@@ -1,3 +1,7 @@
 node_modules/
 .env
+.chrome-profile/
+*.log
+npm-debug.log*
+.DS_Store
 dist/
