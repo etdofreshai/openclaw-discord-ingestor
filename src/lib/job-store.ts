@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import type { SincePreset } from './since-presets.js';
+import type { SincePreset, CadencePreset } from './since-presets.js';
 
 export interface Job {
   id: string;
@@ -15,8 +15,25 @@ export interface Job {
    * Relative lookback window preset (e.g. '1h', '1d').
    * When set, takes precedence over the static `after` field.
    * The effective `after` snowflake is computed at runtime from (now - preset).
+   *
+   * For scheduled jobs: if sincePreset is not set, it defaults to cadencePreset
+   * at creation time (fetch messages from the last cadence window each run).
    */
   sincePreset?: SincePreset;
+  /**
+   * Scheduling cadence preset (e.g. '1h', '1d').
+   * When present, the scheduler uses boundary-aligned UTC timing instead of
+   * the "lastRun + intervalMinutes" drift approach.
+   *
+   * New jobs always have this field. Old jobs (pre-v0.3) may only have
+   * intervalMinutes — they continue to work with interval-drift scheduling.
+   */
+  cadencePreset?: CadencePreset;
+  /**
+   * Run interval in minutes. For new jobs this is derived from cadencePreset
+   * and stored for reference. For old jobs (backward compat) this is the sole
+   * scheduling source when cadencePreset is absent.
+   */
   intervalMinutes: number;
   enabled: boolean;
   createdAt: string;

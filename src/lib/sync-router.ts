@@ -14,10 +14,16 @@ import { getRecentRuns, createRun, updateRun } from './run-store.js';
 import { scheduleJob, unscheduleJob, runJobNow } from './scheduler.js';
 import {
   isSincePreset,
+  isCadencePreset,
   resolveSincePreset,
   SINCE_PRESETS,
   SINCE_PRESET_LABELS,
+  CADENCE_PRESETS,
+  CADENCE_PRESET_LABELS,
+  CADENCE_BOUNDARY_LABELS,
+  CADENCE_PRESET_MINUTES,
   type SincePreset,
+  type CadencePreset,
 } from './since-presets.js';
 
 const router = Router();
@@ -176,13 +182,24 @@ router.get('/api/jobs', requireAuth, async (_req: Request, res: Response) => {
 });
 
 router.post('/api/jobs', requireAuth, async (req: Request, res: Response) => {
-  const { name, channel, limit, after, before, sincePreset: sincePresetRaw, intervalMinutes, enabled } = req.body as {
+  const {
+    name,
+    channel,
+    limit,
+    after,
+    before,
+    sincePreset: sincePresetRaw,
+    cadencePreset: cadencePresetRaw,
+    intervalMinutes: intervalMinutesRaw,
+    enabled,
+  } = req.body as {
     name?: string;
     channel?: string;
     limit?: number;
     after?: string;
     before?: string;
     sincePreset?: string;
+    cadencePreset?: string;
     intervalMinutes?: number;
     enabled?: boolean;
   };
@@ -191,26 +208,65 @@ router.post('/api/jobs', requireAuth, async (req: Request, res: Response) => {
     res.status(400).json({ error: 'channel is required.' });
     return;
   }
-  if (!name || !name.trim()) {
-    res.status(400).json({ error: 'name is required for scheduled jobs.' });
+
+  // Validate cadencePreset
+  const cadencePreset: CadencePreset | undefined =
+    cadencePresetRaw && isCadencePreset(cadencePresetRaw) ? cadencePresetRaw : undefined;
+  if (cadencePresetRaw && !cadencePreset) {
+    res.status(400).json({
+      error: `Invalid cadencePreset '${cadencePresetRaw}'. Valid values: ${CADENCE_PRESETS.join(', ')}`,
+    });
     return;
   }
 
+  // Derive intervalMinutes from cadencePreset; fall back to explicit value or default 60
+  const intervalMinutes = cadencePreset
+    ? CADENCE_PRESET_MINUTES[cadencePreset]
+    : (intervalMinutesRaw !== undefined && Number(intervalMinutesRaw) > 0
+        ? Number(intervalMinutesRaw)
+        : 60);
+
+  // Validate sincePreset
   const sincePreset: SincePreset | undefined =
     sincePresetRaw && isSincePreset(sincePresetRaw) ? sincePresetRaw : undefined;
   if (sincePresetRaw && !sincePreset) {
-    res.status(400).json({ error: `Invalid sincePreset '${sincePresetRaw}'. Valid values: ${SINCE_PRESETS.join(', ')}` });
+    res.status(400).json({
+      error: `Invalid sincePreset '${sincePresetRaw}'. Valid values: ${SINCE_PRESETS.join(', ')}`,
+    });
     return;
   }
 
+  // Since+cadence default: if no sincePreset provided for a cadenced job,
+  // default it to the cadencePreset — each run fetches the last cadence-window of messages.
+  // Exception: none — all cadence presets are valid since presets.
+  const effectiveSincePreset: SincePreset | undefined =
+    sincePreset ?? (cadencePreset as SincePreset | undefined);
+
+  // Auto-generate job name if blank
+  // Format: "#<channelName-or-id> every <interval label>"
+  let jobName = (name ?? '').trim();
+  if (!jobName) {
+    const session = await loadSession();
+    let channelLabel = channel.trim();
+    if (session) {
+      const fetched = await fetchChannelName(session, channel.trim()).catch(() => null);
+      if (fetched) channelLabel = fetched;
+    }
+    const cadenceLabel = cadencePreset
+      ? SINCE_PRESET_LABELS[cadencePreset as SincePreset]
+      : `${intervalMinutes}m`;
+    jobName = `#${channelLabel} every ${cadenceLabel}`;
+  }
+
   const job = await createJob({
-    name: name.trim(),
+    name: jobName,
     channel: channel.trim(),
     limit: limit !== undefined ? Number(limit) : undefined,
     after: after?.trim() || undefined,
     before: before?.trim() || undefined,
-    sincePreset,
-    intervalMinutes: Number(intervalMinutes) > 0 ? Number(intervalMinutes) : 60,
+    sincePreset: effectiveSincePreset,
+    cadencePreset,
+    intervalMinutes,
     enabled: enabled !== false,
   });
 
@@ -239,7 +295,15 @@ router.post('/api/jobs/:id/run', requireAuth, async (req: Request, res: Response
 
 router.patch('/api/jobs/:id', requireAuth, async (req: Request, res: Response) => {
   const {
-    name, channel, limit, after, before, sincePreset: sincePresetRaw, intervalMinutes, enabled,
+    name,
+    channel,
+    limit,
+    after,
+    before,
+    sincePreset: sincePresetRaw,
+    cadencePreset: cadencePresetRaw,
+    intervalMinutes: intervalMinutesRaw,
+    enabled,
   } = req.body as {
     name?: string;
     channel?: string;
@@ -247,6 +311,7 @@ router.patch('/api/jobs/:id', requireAuth, async (req: Request, res: Response) =
     after?: string | null;
     before?: string | null;
     sincePreset?: string | null;
+    cadencePreset?: string | null;
     intervalMinutes?: number;
     enabled?: boolean;
   };
@@ -258,15 +323,36 @@ router.patch('/api/jobs/:id', requireAuth, async (req: Request, res: Response) =
   if (limit !== undefined) patch.limit = limit === null ? undefined : Number(limit);
   if (after !== undefined) patch.after = after === null ? undefined : String(after).trim() || undefined;
   if (before !== undefined) patch.before = before === null ? undefined : String(before).trim() || undefined;
-  if (intervalMinutes !== undefined) patch.intervalMinutes = Math.max(1, Number(intervalMinutes));
   if (enabled !== undefined) patch.enabled = Boolean(enabled);
+
+  // cadencePreset update also re-derives intervalMinutes
+  if (cadencePresetRaw !== undefined) {
+    if (cadencePresetRaw === null || cadencePresetRaw === '') {
+      patch.cadencePreset = undefined;
+      // intervalMinutes unchanged unless explicitly provided
+    } else if (isCadencePreset(cadencePresetRaw)) {
+      patch.cadencePreset = cadencePresetRaw;
+      patch.intervalMinutes = CADENCE_PRESET_MINUTES[cadencePresetRaw];
+    } else {
+      res.status(400).json({
+        error: `Invalid cadencePreset '${cadencePresetRaw}'. Valid values: ${CADENCE_PRESETS.join(', ')}`,
+      });
+      return;
+    }
+  } else if (intervalMinutesRaw !== undefined) {
+    // Direct intervalMinutes override (legacy / advanced use)
+    patch.intervalMinutes = Math.max(1, Number(intervalMinutesRaw));
+  }
+
   if (sincePresetRaw !== undefined) {
     if (sincePresetRaw === null || sincePresetRaw === '') {
       patch.sincePreset = undefined;
     } else if (isSincePreset(sincePresetRaw)) {
       patch.sincePreset = sincePresetRaw;
     } else {
-      res.status(400).json({ error: `Invalid sincePreset '${sincePresetRaw}'. Valid values: ${SINCE_PRESETS.join(', ')}` });
+      res.status(400).json({
+        error: `Invalid sincePreset '${sincePresetRaw}'. Valid values: ${SINCE_PRESETS.join(', ')}`,
+      });
       return;
     }
   }
@@ -310,6 +396,22 @@ router.get('/api/runs', requireAuth, async (req: Request, res: Response) => {
 
 function buildSyncUI(): string {
   const requiresAuth = Boolean(process.env.UI_TOKEN);
+
+  // Build cadence dropdown options (injected server-side)
+  const cadenceOptions = CADENCE_PRESETS.map(p =>
+    `<option value="${p}">${CADENCE_PRESET_LABELS[p]}</option>`
+  ).join('\n      ');
+
+  // Build since dropdown options (all since presets)
+  const sinceOptions = SINCE_PRESETS.map(p =>
+    `<option value="${p}">${SINCE_PRESET_LABELS[p]}</option>`
+  ).join('\n      ');
+
+  // JSON blobs injected into the page for client-side JS
+  const jsCadenceLabels = JSON.stringify(
+    Object.fromEntries(CADENCE_PRESETS.map(p => [p, SINCE_PRESET_LABELS[p as SincePreset]]))
+  );
+  const jsCadenceBoundaries = JSON.stringify(CADENCE_BOUNDARY_LABELS);
 
   return /* html */ `<!DOCTYPE html>
 <html lang="en">
@@ -375,6 +477,7 @@ tbody tr:hover td{background:rgba(255,255,255,.03)}
 .pill-err{background:rgba(239,68,68,.15);color:#ef4444;border:1px solid rgba(239,68,68,.3)}
 .pill-run{background:rgba(251,191,36,.15);color:#fbbf24;border:1px solid rgba(251,191,36,.3)}
 .pill-dis{background:rgba(100,116,139,.15);color:#64748b;border:1px solid rgba(100,116,139,.3)}
+.pill-blue{background:rgba(114,137,218,.15);color:#a5b4fc;border:1px solid rgba(114,137,218,.3)}
 .empty-row{text-align:center;color:#555;padding:20px;font-size:.85rem}
 .actions{display:flex;gap:4px;flex-wrap:wrap}
 .mono{font-family:'Courier New',monospace;font-size:.78rem;color:#a8b4ff}
@@ -393,6 +496,11 @@ tbody tr:hover td{background:rgba(255,255,255,.03)}
 .field-disabled label{opacity:.6}
 .since-override-note{font-size:.74rem;color:#f59e0b;margin-top:4px;display:none}
 .field-disabled .since-override-note{display:block}
+/* auto-name preview */
+.auto-name-preview{font-size:.78rem;color:#7289da;margin-top:4px;min-height:1.1em}
+/* boundary info box */
+.boundary-info{font-size:.74rem;color:#9ca3af;background:#1e2124;border:1px solid #3d4046;border-radius:5px;padding:6px 9px;margin-top:5px;line-height:1.4}
+.boundary-info strong{color:#d1d5db}
 </style>
 </head>
 <body>
@@ -432,57 +540,84 @@ tbody tr:hover td{background:rgba(255,255,255,.03)}
 
   <div class="field">
     <label>Mode</label>
-    <p class="field-hint">Choose whether to run a one-off sync immediately, or create a scheduled job that repeats on an interval.</p>
+    <p class="field-hint">Choose whether to run a one-off sync immediately, or create a scheduled job that repeats on a boundary-aligned cadence.</p>
     <select id="mode" onchange="onModeChange()">
       <option value="manual">Manual Run — execute immediately</option>
-      <option value="scheduled">Scheduled Job — repeat on interval</option>
+      <option value="scheduled">Scheduled Job — repeat on cadence</option>
     </select>
   </div>
 
-  <div class="field" id="field-name" style="display:none">
-    <label>Job Name <span class="badge badge-req">required</span></label>
-    <p class="field-hint">A human-readable name for this scheduled job (e.g. "General Channel Hourly").</p>
-    <input type="text" id="job-name" placeholder="e.g. General Hourly Sync"/>
+  <!-- ── Scheduled-only fields ── -->
+  <div class="field field-sched-only" style="display:none" id="field-name">
+    <label>Job Name <span class="badge badge-opt">optional</span></label>
+    <p class="field-hint">
+      A label for this scheduled job. Leave blank and one is auto-generated from your channel
+      and cadence — e.g. <em>"#general every 1 hour"</em>. You can always rename it later via the API.
+    </p>
+    <input type="text" id="job-name" placeholder="Leave blank to auto-generate" oninput="updateAutoNamePreview()"/>
+    <div class="auto-name-preview" id="auto-name-preview"></div>
   </div>
 
+  <!-- ── Channel ID (both modes) ── -->
   <div class="field">
     <label>Channel ID <span class="badge badge-req">required</span></label>
-    <p class="field-hint">The numeric Discord channel ID to sync. Right-click a channel in Discord → <em>Copy Channel ID</em> (requires Developer Mode in Discord settings).</p>
-    <input type="text" id="channel" placeholder="e.g. 123456789012345678" autocomplete="off"/>
+    <p class="field-hint">The numeric Discord channel ID. Right-click a channel in Discord → <em>Copy Channel ID</em> (requires Developer Mode in Discord settings).</p>
+    <input type="text" id="channel" placeholder="e.g. 123456789012345678" autocomplete="off" oninput="updateAutoNamePreview()"/>
   </div>
 
-  <div class="field">
-    <label>Limit <span class="badge badge-opt">optional</span></label>
-    <p class="field-hint">Max messages to fetch per run. Discord caps this at 100. Leave blank for the default (100).</p>
-    <input type="number" id="limit" min="1" max="100" placeholder="100"/>
+  <!-- ── Cadence dropdown (scheduled only) ── -->
+  <div class="field field-sched-only" style="display:none" id="field-cadence">
+    <label>Cadence <span class="badge badge-req">required</span></label>
+    <p class="field-hint">
+      How often this job runs. Jobs fire on <strong>natural UTC boundaries</strong>, not "now + interval" —
+      so every hour means exactly at :00, every day means midnight UTC, every week means Monday 00:00 UTC, etc.
+      This keeps run times predictable and drift-free across server restarts.
+    </p>
+    <select id="cadence" onchange="onCadenceChange()">
+      ${cadenceOptions}
+    </select>
+    <div class="boundary-info" id="cadence-boundary-info">
+      <strong>Boundary:</strong> <span id="cadence-boundary-text"></span>
+    </div>
   </div>
 
+  <!-- ── Since preset (both modes; in scheduled mode defaults to cadence) ── -->
   <div class="field">
     <label>Since <span class="badge badge-opt">optional</span></label>
-    <p class="field-hint">Fetch messages from the last N minutes/hours/days. Computed at run time from <em>now − window</em>. <strong>Precedence:</strong> when Since is set, it overrides any explicit After value.</p>
+    <p class="field-hint" id="since-hint-manual">
+      Fetch messages from the last N minutes/hours/days. Computed at run time from <em>now − window</em>.
+      <strong>Precedence:</strong> when Since is set, it overrides any explicit After value.
+    </p>
+    <p class="field-hint" id="since-hint-scheduled" style="display:none">
+      Lookback window for each run — how far back to fetch messages. Computed at run time from <em>now − window</em>.
+      <strong>If left blank, defaults to the same value as the cadence</strong> (e.g. hourly cadence → fetch the last 1 hour each run, keeping the window aligned with the boundary).
+    </p>
     <select id="since-preset" onchange="onSinceChange()">
-      <option value="">— No preset (use After field or fetch latest) —</option>
-      ${SINCE_PRESETS.map(p => `<option value="${p}">${SINCE_PRESET_LABELS[p]}</option>`).join('\n      ')}
+      <option value="">— Default (use cadence window in scheduled mode / fetch latest in manual) —</option>
+      ${sinceOptions}
     </select>
   </div>
 
-  <div class="field" id="field-after">
+  <!-- ── After (manual only) ── -->
+  <div class="field field-manual-only" id="field-after">
     <label>After <span class="badge badge-opt">optional</span></label>
     <p class="field-hint">Fetch messages <em>after</em> this message ID (exclusive). Paste the ID of the last message you have for incremental syncs. <em>Ignored when a Since preset is selected.</em></p>
     <input type="text" id="after" placeholder="e.g. 987654321098765432" autocomplete="off"/>
     <div class="since-override-note">⚠ Since preset is active — this After value will be ignored.</div>
   </div>
 
-  <div class="field">
-    <label>Before <span class="badge badge-opt">optional</span></label>
-    <p class="field-hint">Fetch messages <em>before</em> this message ID (exclusive). Use for paginating backwards through channel history. Cannot be combined with After.</p>
-    <input type="text" id="before" placeholder="e.g. 987654321098765432" autocomplete="off"/>
+  <!-- ── Limit (manual only) ── -->
+  <div class="field field-manual-only" id="field-limit">
+    <label>Limit <span class="badge badge-opt">optional</span></label>
+    <p class="field-hint">Max messages to fetch per run. Discord caps this at 100. Leave blank for the default (100).</p>
+    <input type="number" id="limit" min="1" max="100" placeholder="100"/>
   </div>
 
-  <div class="field" id="field-interval" style="display:none">
-    <label>Schedule Interval (minutes) <span class="badge badge-req">required</span></label>
-    <p class="field-hint">How often the job should run. Default is 60 minutes (every hour). Minimum is 1 minute.</p>
-    <input type="number" id="interval" min="1" value="60" placeholder="60"/>
+  <!-- ── Before (manual only) ── -->
+  <div class="field field-manual-only" id="field-before">
+    <label>Before <span class="badge badge-opt">optional</span></label>
+    <p class="field-hint">Fetch messages <em>before</em> this message ID (exclusive). Use for paginating backwards through channel history.</p>
+    <input type="text" id="before" placeholder="e.g. 987654321098765432" autocomplete="off"/>
   </div>
 
   <button class="btn btn-primary" id="submit-btn" onclick="handleSubmit()">▶ Run Sync</button>
@@ -517,6 +652,11 @@ tbody tr:hover td{background:rgba(255,255,255,.03)}
 const REQUIRES_AUTH = ${requiresAuth ? 'true' : 'false'};
 const TOKEN_KEY = 'discord_sync_ui_token';
 
+// Cadence short labels ("1 hour", "15 minutes", …) keyed by preset string
+const CADENCE_LABELS = ${jsCadenceLabels};
+// Boundary descriptions keyed by preset string
+const CADENCE_BOUNDARIES = ${jsCadenceBoundaries};
+
 // ── Token management ────────────────────────────────────────────────────────
 function getToken() { return localStorage.getItem(TOKEN_KEY) || ''; }
 function saveToken(val) { localStorage.setItem(TOKEN_KEY, val); }
@@ -545,7 +685,6 @@ async function submitModalToken() {
   const val = input.value.trim();
   if (!val) return;
 
-  // Validate against the server
   errEl.style.display = 'none';
   try {
     const res = await fetch('/api/jobs', {
@@ -587,16 +726,59 @@ function updateAuthBar() {
 function onModeChange() {
   const mode = document.getElementById('mode').value;
   const isScheduled = mode === 'scheduled';
-  document.getElementById('field-name').style.display = isScheduled ? '' : 'none';
-  document.getElementById('field-interval').style.display = isScheduled ? '' : 'none';
-  document.getElementById('submit-btn').textContent = isScheduled ? '📅 Create Scheduled Job' : '▶ Run Sync';
-  onSinceChange(); // re-evaluate after state
+
+  // Toggle scheduled-only fields
+  for (const el of document.querySelectorAll('.field-sched-only')) {
+    el.style.display = isScheduled ? '' : 'none';
+  }
+  // Toggle manual-only fields
+  for (const el of document.querySelectorAll('.field-manual-only')) {
+    el.style.display = isScheduled ? 'none' : '';
+  }
+  // Swap since hints
+  document.getElementById('since-hint-manual').style.display = isScheduled ? 'none' : '';
+  document.getElementById('since-hint-scheduled').style.display = isScheduled ? '' : 'none';
+
+  document.getElementById('submit-btn').textContent = isScheduled
+    ? '📅 Create Scheduled Job'
+    : '▶ Run Sync';
+
+  onCadenceChange();
+  onSinceChange();
+  updateAutoNamePreview();
+}
+
+// ── Cadence selector ────────────────────────────────────────────────────────
+function onCadenceChange() {
+  const cadence = document.getElementById('cadence').value;
+  const boundary = CADENCE_BOUNDARIES[cadence] || '';
+  const textEl = document.getElementById('cadence-boundary-text');
+  if (textEl) textEl.textContent = boundary;
+  updateAutoNamePreview();
+}
+
+// ── Auto-name preview ───────────────────────────────────────────────────────
+// Shows the name that will be generated when Job Name is left blank.
+function updateAutoNamePreview() {
+  const mode = document.getElementById('mode').value;
+  const nameEl = document.getElementById('auto-name-preview');
+  if (!nameEl) return;
+  if (mode !== 'scheduled') { nameEl.textContent = ''; return; }
+
+  const nameFilled = document.getElementById('job-name').value.trim();
+  if (nameFilled) { nameEl.textContent = ''; return; }
+
+  const channel = document.getElementById('channel').value.trim() || 'channel';
+  const cadence = document.getElementById('cadence').value;
+  const label = CADENCE_LABELS[cadence] || cadence;
+  nameEl.textContent = \`Auto-name will be: #\${channel} every \${label}\`;
 }
 
 // ── Since preset selector ───────────────────────────────────────────────────
 function onSinceChange() {
   const preset = document.getElementById('since-preset').value;
   const fieldAfter = document.getElementById('field-after');
+  if (!fieldAfter) return;
   if (preset) {
     fieldAfter.classList.add('field-disabled');
     document.getElementById('after').disabled = true;
@@ -660,14 +842,11 @@ async function handleRunSync() {
 async function handleCreateJob() {
   const name = document.getElementById('job-name').value.trim();
   const channel = document.getElementById('channel').value.trim();
-  const limit = document.getElementById('limit').value.trim();
+  const cadence = document.getElementById('cadence').value;
   const sincePreset = document.getElementById('since-preset').value;
-  const after = !sincePreset ? document.getElementById('after').value.trim() : '';
-  const before = document.getElementById('before').value.trim();
-  const interval = document.getElementById('interval').value.trim();
 
-  if (!name) { showResult('error', 'Job name is required.'); return; }
   if (!channel) { showResult('error', 'Channel ID is required.'); return; }
+  if (!cadence) { showResult('error', 'Cadence is required.'); return; }
 
   const btn = document.getElementById('submit-btn');
   btn.disabled = true;
@@ -675,15 +854,14 @@ async function handleCreateJob() {
 
   try {
     const body = {
-      name,
       channel,
-      intervalMinutes: parseInt(interval || '60', 10),
+      cadencePreset: cadence,
       enabled: true,
     };
-    if (limit) body.limit = parseInt(limit, 10);
+    // name: send only if provided — empty string means server auto-generates
+    if (name) body.name = name;
     if (sincePreset) body.sincePreset = sincePreset;
-    else if (after) body.after = after;
-    if (before) body.before = before;
+    // Note: limit/after/before are intentionally omitted in scheduled mode
 
     const res = await fetch('/api/jobs', {
       method: 'POST',
@@ -693,17 +871,16 @@ async function handleCreateJob() {
     const data = await res.json();
 
     if (res.ok && data.id) {
-      showResult('ok', '✅ Scheduled job created', data);
+      showResult('ok', '✅ Scheduled job created: ' + esc(data.name), data);
       loadJobsTable();
       // Reset form
       document.getElementById('job-name').value = '';
       document.getElementById('channel').value = '';
-      document.getElementById('limit').value = '';
       document.getElementById('since-preset').value = '';
-      document.getElementById('after').value = '';
-      document.getElementById('before').value = '';
-      document.getElementById('interval').value = '60';
-      onSinceChange(); // restore after field
+      document.getElementById('cadence').value = '1h';
+      onCadenceChange();
+      updateAutoNamePreview();
+      onSinceChange();
     } else {
       showResult('error', '❌ Failed to create job (HTTP ' + res.status + ')', data);
     }
@@ -750,13 +927,20 @@ function renderJobsTable(jobs) {
     const lastRun = j.lastRunAt ? reltime(j.lastRunAt) : '—';
     const toggleLabel = j.enabled ? 'Disable' : 'Enable';
     const toggleClass = j.enabled ? 'btn-warn' : 'btn-success';
+
+    // Cadence cell: show preset label with boundary tooltip, or fallback to minutes
+    const cadenceCell = j.cadencePreset
+      ? \`<span class="status-pill pill-blue" title="\${esc(CADENCE_BOUNDARIES[j.cadencePreset] || '')}">\${esc(CADENCE_LABELS[j.cadencePreset] || j.cadencePreset)}</span>\`
+      : \`<span class="mono">\${j.intervalMinutes}m</span>\`;
+
     const sinceCell = j.sincePreset
       ? \`<span class="status-pill pill-run" title="Resolved at runtime to effective after snowflake">\${esc(j.sincePreset)}</span>\`
       : (j.after ? \`<span class="mono" style="font-size:.72rem" title="Static after ID">\${esc(j.after.slice(0,12))}…</span>\` : '—');
+
     return \`<tr>
       <td>\${esc(j.name)}</td>
       <td><span class="mono">\${esc(j.channel)}</span></td>
-      <td>\${j.intervalMinutes}m</td>
+      <td>\${cadenceCell}</td>
       <td>\${sinceCell}</td>
       <td>\${enabledPill}</td>
       <td>\${lastRun}</td>
@@ -771,7 +955,7 @@ function renderJobsTable(jobs) {
 
   return \`<table>
     <thead><tr>
-      <th>Name</th><th>Channel</th><th>Every</th><th>Since/After</th><th>Status</th><th>Last Run</th><th>Last Result</th><th>Actions</th>
+      <th>Name</th><th>Channel</th><th>Cadence</th><th>Since/After</th><th>Status</th><th>Last Run</th><th>Last Result</th><th>Actions</th>
     </tr></thead>
     <tbody>\${rows}</tbody>
   </table>\`;
@@ -893,6 +1077,11 @@ function reltime(iso) {
 // ── Init ────────────────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
   updateAuthBar();
+
+  // Set default cadence and fire initial onCadenceChange to populate boundary hint
+  const cadenceEl = document.getElementById('cadence');
+  if (cadenceEl && !cadenceEl.value) cadenceEl.value = '1h';
+  onCadenceChange();
 
   if (REQUIRES_AUTH && !getToken()) {
     showModal();

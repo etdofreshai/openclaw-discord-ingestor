@@ -23,10 +23,12 @@ Imports Discord messages into the existing OpenClaw PostgreSQL `messages` table 
 - Pull messages from any channel ID
 - Idempotent upsert into messages table
 
-### Web UI (v0.2)
+### Web UI (v0.3)
 - **Sync form** with Manual Run or Scheduled Job mode
 - **Auth modal** — shown only when `UI_TOKEN` is set; saves token to `localStorage`
 - **Scheduled jobs** — persisted to `.data/jobs/jobs.json`, auto-scheduled on server start
+- **Cadence presets** — dropdown of standard intervals (1m → 1y); boundary-aligned UTC scheduling
+- **Auto-name** — blank job name auto-generates from channel + cadence (e.g. `#general every 1 hour`)
 - **Run logs** — every sync recorded with metrics in `.data/runs/runs.json`
 - **Jobs table** — list, run, enable/disable, and delete scheduled jobs
 - **Runs table** — last 50 runs with counts (fetched, inserted, updated, skipped, attachments)
@@ -83,75 +85,169 @@ http://localhost:3456/sync
 #### Scheduled Job
 
 1. Select **"Scheduled Job"** in the mode dropdown
-2. Fill in **Job Name** (required), **Channel ID** (required), optional params, and **Interval (minutes)** (default: 60)
-3. Click **📅 Create Scheduled Job**
-4. Job appears in the Scheduled Jobs table; it runs automatically at the configured interval
-5. Jobs survive server restarts — timers are rehydrated from `.data/jobs/jobs.json`
+2. Fill in **Channel ID** (required) and select a **Cadence** (required)
+3. Optionally enter a **Job Name** — if left blank, one is auto-generated as `#<channelName> every <cadence>` (e.g., `#general every 1 hour`)
+4. Optionally select a **Since** lookback window — if left blank, defaults to the same value as cadence
+5. Click **📅 Create Scheduled Job**
+6. Job appears in the Scheduled Jobs table; it fires automatically at the next UTC boundary for the cadence
+7. Jobs survive server restarts — timers are rehydrated from `.data/jobs/jobs.json`
 
-#### Since Preset (relative lookback window)
+> **Limit / After / Before fields are hidden in Scheduled Job mode.** Scheduled jobs use `channel + cadence + since` only. These fields remain supported for Manual Run mode and via the API directly.
 
-The **Since** dropdown lets you specify a relative lookback window instead of a fixed "after" message ID.
+---
+
+## Cadence Presets
+
+Scheduled jobs fire at **natural UTC boundaries**, not "now + interval" drift.
+This means the run times are predictable and consistent across server restarts.
+
+| Preset | Label | Boundary Rule (UTC) | `intervalMinutes` |
+|--------|-------|---------------------|:-----------------:|
+| `1m`   | Every 1 minute     | HH:MM:00 each minute             | 1      |
+| `5m`   | Every 5 minutes    | minute % 5 == 0                  | 5      |
+| `15m`  | Every 15 minutes   | :00/:15/:30/:45 each hour        | 15     |
+| `30m`  | Every 30 minutes   | :00/:30 each hour                | 30     |
+| `1h`   | Every 1 hour       | top of each hour                 | 60     |
+| `2h`   | Every 2 hours      | hour % 2 == 0                    | 120    |
+| `4h`   | Every 4 hours      | hour % 4 == 0                    | 240    |
+| `6h`   | Every 6 hours      | hour % 6 == 0                    | 360    |
+| `12h`  | Every 12 hours     | midnight & noon                  | 720    |
+| `1d`   | Every day          | midnight UTC                     | 1440   |
+| `3d`   | Every 3 days       | every 3rd day from Unix epoch, midnight UTC | 4320 |
+| `1w`   | Every week         | Monday 00:00 UTC                 | 10080  |
+| `2w`   | Every 2 weeks      | biweekly Monday 00:00 UTC ¹      | 20160  |
+| `1mo`  | Every month        | 1st of each month, 00:00 UTC     | 43200  |
+| `2mo`  | Every 2 months     | 1st of Jan/Mar/May/Jul/Sep/Nov, 00:00 UTC | 86400 |
+| `3mo`  | Every quarter      | 1st of Jan/Apr/Jul/Oct, 00:00 UTC | 129600 |
+| `4mo`  | Every 4 months     | 1st of Jan/May/Sep, 00:00 UTC    | 172800 |
+| `6mo`  | Every 6 months     | 1st of Jan/Jul, 00:00 UTC        | 259200 |
+| `1y`   | Every year         | Jan 1, 00:00 UTC                 | 525960 |
+
+¹ Biweekly anchor: **1970-01-05** (Monday, 4 days after Unix epoch). Two-week cycles count forward from this date.
+
+### Boundary Examples
+
+| It is… | Cadence | Next run |
+|--------|---------|----------|
+| 14:03:47 UTC | `1h`  | 15:00:00 UTC |
+| 14:03:47 UTC | `15m` | 14:15:00 UTC |
+| 14:03:47 UTC | `1d`  | 2024-02-01 00:00:00 UTC (next midnight) |
+| Wed 14:03 UTC | `1w`  | Mon 00:00 UTC (next Monday) |
+| Jan 15 UTC | `1mo` | Feb 1 00:00 UTC |
+| Feb 15 UTC | `3mo` | Apr 1 00:00 UTC |
+
+### Timezone
+
+All boundaries are computed in **UTC**. The server has no concept of local timezone for scheduling.
+If you need a local-timezone anchor (e.g., midnight CST), schedule the job manually via `POST /api/jobs` with the desired `intervalMinutes` and no `cadencePreset` — that falls back to interval-drift scheduling.
+
+### Determinism & Drift
+
+- `computeNextBoundary(cadence, now)` always returns the **next** UTC boundary strictly after `now`.
+- The scheduler calls this fresh on every reschedule, so a 3-second overrun at 14:00:00 still schedules the next run at 15:00:00 (not 15:00:03).
+- Server restarts recalculate the next boundary from current time — no drift accumulates.
+
+---
+
+## Since Preset + Cadence Defaults
+
+The **Since** field sets how far back to fetch messages on each scheduled run.
+
+### Precedence
+
+| `sincePreset` provided? | Behavior |
+|------------------------|----------|
+| **Yes** | Uses the explicit since preset |
+| **No (scheduled job)** | Defaults to the cadencePreset (e.g., hourly job → fetch last 1 hour each run) |
+| **No (manual run)** | Fetches the latest messages (no lookback limit unless `after` is set) |
+
+### Cadence → Default Since Mapping
+
+All cadence presets are also valid since presets, so the mapping is 1:1 with no exceptions:
+
+| Cadence | Default Since | What each run fetches |
+|---------|---------------|-----------------------|
+| `1m`  | `1m`  | Messages from the last 1 minute  |
+| `5m`  | `5m`  | Messages from the last 5 minutes |
+| `15m` | `15m` | Messages from the last 15 minutes |
+| `30m` | `30m` | Messages from the last 30 minutes |
+| `1h`  | `1h`  | Messages from the last 1 hour |
+| `2h`  | `2h`  | Messages from the last 2 hours |
+| … | … | … |
+| `1y`  | `1y`  | Messages from the last year |
+
+You can override Since to a different value — for example, a daily job could use `since=1w` to fetch a week's worth of messages on each daily run (useful for backfill or tolerance of missed runs).
+
+**Precedence rule (detail):** `sincePreset` **overrides** any explicit `after` value when both are set.
+The static `after` field is ignored and the `sincePreset`-derived snowflake is used instead.
+The UI disables the `after` field when a preset is selected.
+
+---
+
+## Auto-Name Behavior
+
+When creating a scheduled job with an empty **Job Name**, the server auto-generates one:
+
+```
+#<channelName-or-id> every <since label>
+```
+
+Examples:
+- `#general every 1 hour`
+- `#1234567890 every 15 minutes` (when channel name can't be resolved)
+- `#announcements every 1 day`
+
+The channel name is resolved via the Discord API at creation time. If resolution fails, the channel ID is used as a fallback. The name is stored in the job and can be updated later via `PATCH /api/jobs/:id`.
+
+---
+
+## Since Presets (Lookback Windows)
+
+The **Since** dropdown in Manual mode (and optionally in Scheduled mode) controls how far back to fetch messages.
 
 | Preset | Window |
 |--------|--------|
-| `15m` | Last 15 minutes |
-| `30m` | Last 30 minutes |
-| `1h` | Last 1 hour |
-| `2h` | Last 2 hours |
-| `4h` | Last 4 hours |
-| `6h` | Last 6 hours |
-| `12h` | Last 12 hours |
-| `1d` | Last 1 day |
-| `3d` | Last 3 days |
-| `1w` | Last 1 week |
-| `2w` | Last 2 weeks |
-| `1mo` | Last ~30 days |
-| `2mo` | Last ~60 days |
-| `3mo` | Last ~90 days |
-| `4mo` | Last ~120 days |
-| `6mo` | Last ~180 days |
-| `1y` | Last ~365 days |
-| `3y` | Last ~3 years |
-| `5y` | Last ~5 years |
-| `10y` | Last ~10 years |
-| `20y` | Last ~20 years |
-| `all` | All time (from beginning) |
+| `1m`   | Last 1 minute |
+| `5m`   | Last 5 minutes |
+| `15m`  | Last 15 minutes |
+| `30m`  | Last 30 minutes |
+| `1h`   | Last 1 hour |
+| `2h`   | Last 2 hours |
+| `4h`   | Last 4 hours |
+| `6h`   | Last 6 hours |
+| `12h`  | Last 12 hours |
+| `1d`   | Last 1 day |
+| `3d`   | Last 3 days |
+| `1w`   | Last 1 week |
+| `2w`   | Last 2 weeks |
+| `1mo`  | Last ~30 days |
+| `2mo`  | Last ~60 days |
+| `3mo`  | Last ~90 days |
+| `4mo`  | Last ~120 days |
+| `6mo`  | Last ~180 days |
+| `1y`   | Last ~365 days |
+| `3y`   | Last ~3 years |
+| `5y`   | Last ~5 years |
+| `10y`  | Last ~10 years |
+| `20y`  | Last ~20 years |
+| `all`  | All time (from beginning) |
 
 **How it works:** At run time, the preset is resolved to an effective "after" Discord snowflake ID by computing `now − presetMs`. This snowflake is passed to the Discord messages API as the `after` parameter.
 
-**Precedence rule:** `sincePreset` **overrides** any explicit `after` value when both are set.
-The static `after` field is ignored and the `sincePreset`-derived snowflake is used instead.
-The UI disables the `after` field when a preset is selected and shows a warning.
+---
 
-This is ideal for scheduled jobs — e.g., a job running every hour with `since=1h` will always fetch only the last hour of messages, regardless of when it last ran.
-
-#### Scheduled Jobs table
+## Scheduled Jobs table
 
 | Column | Description |
 |--------|-------------|
-| Name | Human-readable job name |
+| Name | Human-readable job name (auto-generated if left blank at creation) |
 | Channel | Discord channel ID |
-| Every | Interval in minutes |
+| Cadence | Preset label with boundary tooltip (hover for the rule). Legacy jobs without cadencePreset show raw minutes. |
+| Since/After | Since preset or static after ID used for lookback |
 | Status | enabled / disabled |
 | Last Run | Relative time of last execution |
 | Last Result | success / error / never |
 | Actions | ▶ Run now · Enable/Disable · ✕ Delete |
-
-#### Recent Runs table
-
-| Column | Description |
-|--------|-------------|
-| Started | When the run began |
-| Source | manual or scheduled (with job ID) |
-| Channel | Channel ID synced |
-| Status | success / error / running |
-| Fetched | Messages retrieved from Discord API |
-| Inserted | New rows written to DB |
-| Updated | Existing rows updated |
-| Skipped | Rows with no change (upsert no-op) |
-| Attachments | Total attachments seen across fetched messages |
-| Duration | Elapsed seconds |
-| Error | Error message (truncated) if failed |
 
 ---
 
@@ -181,40 +277,9 @@ Body params:
 | `after` | optional | Fetch messages after this message ID. Ignored when `sincePreset` is set. |
 | `before` | optional | Fetch messages before this message ID |
 
-**Example with sincePreset:**
-```bash
-curl -X POST http://localhost:3456/api/sync \
-  -H "Authorization: Bearer your-token" \
-  -H "Content-Type: application/json" \
-  -d '{"channel":"123456789012345678","sincePreset":"1h"}'
-```
-
-Response:
-```json
-{
-  "success": true,
-  "runId": "uuid",
-  "channel": "123456789012345678",
-  "user": "username#0",
-  "sincePreset": "1h",
-  "effectiveAfter": "1331913827041280000",
-  "fetched": 47,
-  "inserted": 45,
-  "updated": 2,
-  "skipped": 0,
-  "attachmentsSeen": 3
-}
-```
-
-Valid `sincePreset` values: `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `12h`, `1d`, `3d`, `1w`, `2w`, `1mo`, `2mo`, `3mo`, `4mo`, `6mo`, `1y`, `3y`, `5y`, `10y`, `20y`, `all`
-
 ### `GET /api/jobs`
 
 List all scheduled jobs.
-
-```bash
-curl http://localhost:3456/api/jobs -H "Authorization: Bearer your-token"
-```
 
 ### `POST /api/jobs`
 
@@ -224,79 +289,119 @@ Create a scheduled job.
 curl -X POST http://localhost:3456/api/jobs \
   -H "Authorization: Bearer your-token" \
   -H "Content-Type: application/json" \
-  -d '{"name":"General Hourly","channel":"123456789012345678","intervalMinutes":60,"enabled":true}'
+  -d '{"channel":"123456789012345678","cadencePreset":"1h","enabled":true}'
 ```
 
 Body params:
 
 | Param | Required | Description |
 |-------|----------|-------------|
-| `name` | ✅ | Human-readable job name |
 | `channel` | ✅ | Discord channel ID |
-| `intervalMinutes` | optional | Run interval (default 60, min 1) |
-| `limit` | optional | Max messages per run |
-| `sincePreset` | optional | Relative lookback window (e.g. `"1h"`). **Overrides `after` at each execution.** |
-| `after` | optional | Static after-message-ID filter. Ignored when `sincePreset` is set. |
-| `before` | optional | Static before-message-ID filter |
-| `enabled` | optional | Start enabled (default true) |
+| `cadencePreset` | recommended | Cadence preset (e.g. `"1h"`, `"1d"`). Derives `intervalMinutes` automatically. Enables boundary-aligned scheduling. |
+| `name` | optional | Job name. If blank, auto-generated as `#channelName every label`. |
+| `sincePreset` | optional | Lookback window per run. Defaults to `cadencePreset` if omitted. |
+| `intervalMinutes` | optional | Override interval in minutes. Used only when `cadencePreset` is absent (legacy). |
+| `enabled` | optional | Start enabled (default `true`) |
+| `limit` | optional | Max messages per run (advanced / manual use) |
+| `after` | optional | Static after-message-ID filter (advanced / manual use) |
+| `before` | optional | Static before-message-ID filter (advanced / manual use) |
 
-**Example with sincePreset (recommended for recurring jobs):**
+**Example with cadencePreset (recommended):**
 ```bash
 curl -X POST http://localhost:3456/api/jobs \
   -H "Authorization: Bearer your-token" \
   -H "Content-Type: application/json" \
-  -d '{"name":"General 1h","channel":"123456789012345678","intervalMinutes":60,"sincePreset":"1h","enabled":true}'
+  -d '{"channel":"123456789012345678","cadencePreset":"1h"}'
+# → name auto-generated, sincePreset defaults to "1h"
+```
+
+**Legacy example (intervalMinutes only — no boundary alignment):**
+```bash
+curl -X POST http://localhost:3456/api/jobs \
+  -H "Authorization: Bearer your-token" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"My Job","channel":"123456789012345678","intervalMinutes":60,"sincePreset":"1h","enabled":true}'
 ```
 
 ### `POST /api/jobs/:id/run`
 
 Trigger a scheduled job immediately (async, fire-and-forget). Check `/api/runs` for the result.
 
-```bash
-curl -X POST http://localhost:3456/api/jobs/<id>/run \
-  -H "Authorization: Bearer your-token"
-```
-
 ### `PATCH /api/jobs/:id`
 
-Update job fields (including enable/disable).
+Update job fields. Supports `cadencePreset` (re-derives `intervalMinutes` automatically).
 
 ```bash
+# Change cadence
+curl -X PATCH http://localhost:3456/api/jobs/<id> \
+  -H "Authorization: Bearer your-token" \
+  -H "Content-Type: application/json" \
+  -d '{"cadencePreset":"6h"}'
+
 # Disable a job
 curl -X PATCH http://localhost:3456/api/jobs/<id> \
   -H "Authorization: Bearer your-token" \
   -H "Content-Type: application/json" \
   -d '{"enabled":false}'
-
-# Change interval
-curl -X PATCH http://localhost:3456/api/jobs/<id> \
-  -H "Authorization: Bearer your-token" \
-  -H "Content-Type: application/json" \
-  -d '{"intervalMinutes":30}'
 ```
 
 ### `DELETE /api/jobs/:id`
 
 Delete a scheduled job and cancel its timer.
 
-```bash
-curl -X DELETE http://localhost:3456/api/jobs/<id> \
-  -H "Authorization: Bearer your-token"
-```
-
 ### `GET /api/runs`
 
 Get recent run logs (newest first). Optional `?limit=N` (max 200, default 50).
 
-```bash
-curl http://localhost:3456/api/runs?limit=20 -H "Authorization: Bearer your-token"
+---
+
+## Job Model
+
+```typescript
+interface Job {
+  id: string;
+  name: string;
+  channel: string;
+  // Scheduling
+  cadencePreset?: CadencePreset;   // e.g. "1h" — drives boundary-aligned scheduling
+  intervalMinutes: number;         // derived from cadencePreset, or explicit for legacy jobs
+  // Lookback
+  sincePreset?: SincePreset;       // e.g. "1h" — defaults to cadencePreset for new jobs
+  after?: string;                  // static after snowflake (advanced)
+  before?: string;                 // static before snowflake (advanced)
+  limit?: number;                  // max messages per run (advanced)
+  // State
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  lastRunAt?: string;
+  lastStatus?: 'success' | 'error' | 'running';
+}
 ```
+
+### Backward Compatibility
+
+Old jobs (pre-v0.3) stored in `.data/jobs/jobs.json` with only `intervalMinutes` and no `cadencePreset` continue to work — the scheduler falls back to interval-drift scheduling (`lastRun + intervalMinutes`).
+
+New jobs created via the UI or API with `cadencePreset` use boundary-aligned UTC scheduling.
+
+---
+
+## Scheduler Details
+
+- Jobs are loaded from `.data/jobs/jobs.json` on server startup via `startScheduler()`
+- Each enabled job with `cadencePreset` is scheduled for the next UTC boundary via `computeNextBoundary(cadence, now)`
+- Each enabled job without `cadencePreset` (legacy) uses `lastRunAt + intervalMinutes` drift scheduling
+- Overlapping runs of the same job are prevented via an in-memory `Set`
+- Editing a job via `PATCH /api/jobs/:id` reschedules its timer automatically
+- Disabling a job cancels its timer immediately
+- `POST /api/jobs/:id/run` fires the job immediately and reschedules for the next boundary
 
 ---
 
 ## Storage Paths
 
-All runtime data is stored relative to the server's working directory (the project root when using `npm run server`):
+All runtime data is stored relative to the server's working directory:
 
 | Path | Contents |
 |------|----------|
@@ -370,22 +475,10 @@ src/
     ├── live-sync.ts          # Discord API fetch + DB upsert (returns SyncResult)
     ├── job-store.ts          # Job CRUD + .data/jobs/jobs.json persistence
     ├── run-store.ts          # Run log append/query + .data/runs/runs.json persistence
-    ├── scheduler.ts          # In-process interval scheduler (rehydrates on start)
-    ├── since-presets.ts      # SincePreset type, labels, ms resolver, Discord snowflake converter
+    ├── scheduler.ts          # Boundary-aligned scheduler (rehydrates on start)
+    ├── since-presets.ts      # SincePreset + CadencePreset types, labels, boundary computation
     └── sync-router.ts        # All /sync and /api/* routes + full-page HTML UI
 ```
-
----
-
-## Scheduler Details
-
-- Jobs are loaded from `.data/jobs/jobs.json` on server startup
-- Each enabled job gets a `setTimeout` timer calculating the delay from `lastRunAt + intervalMinutes`
-- If a job has never run, it starts after a 5-second delay (to let the server finish starting up)
-- Overlapping runs of the same job are prevented via an in-memory `Set`
-- Editing a job via `PATCH /api/jobs/:id` reschedules its timer automatically
-- Disabling a job cancels its timer immediately
-- `POST /api/jobs/:id/run` fires the job immediately and reschedules from that point
 
 ---
 
