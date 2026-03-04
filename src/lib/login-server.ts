@@ -211,11 +211,19 @@ export function handleDiscordLoginWs(req: IncomingMessage, socket: Duplex, head:
             );
           }
           cdpCommand('Page.screencastFrameAck', { sessionId });
+        } else if (msg.method === 'Network.requestWillBeSentExtraInfo') {
+          // Best signal: Discord web client sends user token in Authorization header
+          const headers = msg.params?.headers || {};
+          const auth = headers.authorization || headers.Authorization;
+          if (typeof auth === 'string' && auth.length > 20) {
+            capturedToken = auth;
+            await checkAndCaptureToken();
+          }
         } else if (msg.method === 'Network.responseReceived') {
           // Check for Discord API responses that indicate successful login
           const url = msg.params?.response?.url || '';
-          if (url.includes('discord.com/api') && url.includes('@me')) {
-            // Try to extract token from localStorage
+          if (url.includes('discord.com/api') && (url.includes('@me') || url.includes('/users/'))) {
+            // Try to extract token from localStorage as fallback
             const result = await new Promise<string | null>(resolve => {
               const id = cmdId++;
               cdpWs.send(
