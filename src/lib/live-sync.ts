@@ -39,21 +39,61 @@ export async function fetchChannelName(
   session: DiscordSession,
   channelId: string
 ): Promise<string | null> {
-  const res = await fetch(`https://discord.com/api/v10/channels/${channelId}`, {
-    headers: {
-      Authorization: session.token,
-    },
-  });
+  const url = `https://discord.com/api/v10/channels/${channelId}`;
 
-  if (!res.ok) return null;
+  for (let attempt = 0; attempt <= MAX_429_RETRIES; attempt++) {
+    const res = await fetch(url, {
+      headers: { Authorization: session.token },
+    });
 
-  const data = (await res.json()) as { name?: string; id?: string; type?: number; recipients?: Array<{ username?: string }> };
-  if (data.name && data.name.trim()) return data.name.trim();
-  if (Array.isArray(data.recipients) && data.recipients.length > 0) {
-    const names = data.recipients.map(r => r.username).filter(Boolean) as string[];
-    if (names.length) return names.join(', ');
+    if (res.status === 429) {
+      if (attempt >= MAX_429_RETRIES) return null;
+      await waitForRateLimit(res, attempt, channelId);
+      continue;
+    }
+
+    if (!res.ok) return null;
+
+    const data = (await res.json()) as {
+      name?: string;
+      id?: string;
+      type?: number;
+      recipients?: Array<{ username?: string }>;
+    };
+    if (data.name && data.name.trim()) return data.name.trim();
+    if (Array.isArray(data.recipients) && data.recipients.length > 0) {
+      const names = data.recipients.map(r => r.username).filter(Boolean) as string[];
+      if (names.length) return names.join(', ');
+    }
+    return data.id || null;
   }
-  return data.id || null;
+
+  return null;
+}
+
+/** Maximum number of times to retry after a 429 rate-limit response. */
+const MAX_429_RETRIES = 3;
+
+/**
+ * Wait for the delay indicated by the Discord rate-limit headers.
+ * Uses `Retry-After` (seconds, integer) or `X-RateLimit-Reset-After` (seconds, float).
+ * Falls back to 5 seconds if no header is present.
+ * Adds a 500 ms safety buffer on top of the indicated wait.
+ */
+async function waitForRateLimit(res: Response, attempt: number, channelId: string): Promise<void> {
+  const retryHeader =
+    res.headers.get('retry-after') ??
+    res.headers.get('x-ratelimit-reset-after') ??
+    '5';
+  const retrySecs = parseFloat(retryHeader);
+  const waitMs = Math.ceil((Number.isFinite(retrySecs) ? retrySecs : 5) * 1000) + 500;
+
+  console.warn(
+    `[live-sync] 429 rate-limited — channel=${channelId} ` +
+    `retry-after=${retryHeader}s — waiting ${waitMs}ms before retry ${attempt + 1}/${MAX_429_RETRIES}`
+  );
+
+  await new Promise<void>(resolve => setTimeout(resolve, waitMs));
 }
 
 export async function fetchChannelMessages(
@@ -66,17 +106,33 @@ export async function fetchChannelMessages(
   if (options?.before) params.set('before', options.before);
   if (options?.after) params.set('after', options.after);
 
-  const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages?${params}`, {
-    headers: {
-      Authorization: session.token,
-    },
-  });
+  const url = `https://discord.com/api/v10/channels/${channelId}/messages?${params}`;
 
-  if (!res.ok) {
-    throw new Error(`Failed to fetch messages: ${res.status} ${res.statusText}`);
+  for (let attempt = 0; attempt <= MAX_429_RETRIES; attempt++) {
+    const res = await fetch(url, {
+      headers: { Authorization: session.token },
+    });
+
+    if (res.status === 429) {
+      if (attempt >= MAX_429_RETRIES) {
+        throw new Error(
+          `Discord rate-limited (429) on channel ${channelId} — ` +
+          `exhausted ${MAX_429_RETRIES} retries`
+        );
+      }
+      await waitForRateLimit(res, attempt, channelId);
+      continue; // retry
+    }
+
+    if (!res.ok) {
+      throw new Error(`Failed to fetch messages: ${res.status} ${res.statusText}`);
+    }
+
+    return (await res.json()) as DiscordAPIMessage[];
   }
 
-  return (await res.json()) as DiscordAPIMessage[];
+  // Unreachable — the loop above always returns or throws
+  throw new Error(`fetchChannelMessages: unexpected exit from retry loop (channel=${channelId})`);
 }
 
 function normalize(msg: DiscordAPIMessage): Normalized {

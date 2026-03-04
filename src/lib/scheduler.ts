@@ -5,9 +5,8 @@ import { loadSession } from './session.js';
 import { validateToken } from './token-validator.js';
 import { syncChannelToDB, fetchChannelName } from './live-sync.js';
 import { computeNextBoundary, sincePresetToMs, timestampToSnowflake } from './since-presets.js';
+import { enqueue } from './scheduler-queue.js';
 
-// Track which jobs are currently executing (prevent overlapping runs)
-const runningJobs = new Set<string>();
 // Timers for each scheduled job
 const jobTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -19,19 +18,20 @@ function clearJobTimer(jobId: string): void {
   }
 }
 
-type JobRunOverrides = {
+export type JobRunOverrides = {
   limit?: number;
   before?: string;
   after?: string;
   sincePreset?: Job['sincePreset'];
 };
 
+/**
+ * Core execution logic for a scheduled job.
+ * This is called from within the queue worker — the queue handles the
+ * per-job overlap guard, so this function does NOT need a separate
+ * runningJobs Set.
+ */
 async function executeJob(job: Job, overrides?: JobRunOverrides): Promise<void> {
-  if (runningJobs.has(job.id)) {
-    console.log(`[Scheduler] Job ${job.id} (${job.name}) already running — skipping overlap.`);
-    return;
-  }
-
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) {
     console.error('[Scheduler] DATABASE_URL not configured — cannot run job.');
@@ -51,8 +51,6 @@ async function executeJob(job: Job, overrides?: JobRunOverrides): Promise<void> 
     await updateJob(job.id, { lastStatus: 'error' });
     return;
   }
-
-  runningJobs.add(job.id);
 
   // Resolve sincePreset → effective after snowflake at runtime.
   // Precedence: sincePreset overrides explicit `after` when both are set.
@@ -143,7 +141,6 @@ async function executeJob(job: Job, overrides?: JobRunOverrides): Promise<void> 
     });
   } finally {
     await pool.end();
-    runningJobs.delete(job.id);
   }
 }
 
@@ -152,16 +149,14 @@ async function executeJob(job: Job, overrides?: JobRunOverrides): Promise<void> 
  *
  * Scheduling strategy:
  *   - If job has a `cadencePreset`: boundary-aligned UTC scheduling.
- *     The next run is always the next upcoming UTC boundary for that cadence
- *     (e.g., hourly → top of next hour, daily → next midnight UTC).
- *     This eliminates drift — the job fires at predictable wall-clock times
- *     regardless of when it last ran or when the server started.
+ *     The next run is always the next upcoming UTC boundary for that cadence.
+ *   - If job has only `intervalMinutes` (legacy): interval-drift scheduling.
  *
- *   - If job has only `intervalMinutes` (old/manual jobs): legacy interval-drift
- *     scheduling (lastRun + interval). Maintained for backward compatibility.
- *
- * Overlapping runs are prevented via the `runningJobs` guard inside executeJob.
- * Re-reads the job from disk inside the timer to respect edits/disables.
+ * All executions go through the global scheduler queue (scheduler-queue.ts):
+ *   - Concurrent boundary fires for multiple jobs are serialised via the queue.
+ *   - SCHEDULER_CONCURRENCY and SCHEDULER_JOB_SPACING_MS control throughput.
+ *   - The per-job overlap guard lives in the queue — a job already in the queue
+ *     or running will NOT be enqueued again when its boundary fires.
  */
 export function scheduleJob(job: Job): void {
   clearJobTimer(job.id);
@@ -172,8 +167,6 @@ export function scheduleJob(job: Job): void {
   let delayMs: number;
 
   if (job.cadencePreset) {
-    // Boundary-aligned: always schedule for the next upcoming UTC boundary.
-    // This is deterministic and never drifts regardless of server restarts.
     const nextBoundary = computeNextBoundary(job.cadencePreset);
     delayMs = Math.max(0, nextBoundary.getTime() - Date.now());
     console.log(
@@ -181,7 +174,6 @@ export function scheduleJob(job: Job): void {
       ` next boundary: ${nextBoundary.toISOString()} (in ${Math.round(delayMs / 1000)}s)`
     );
   } else if (job.lastRunAt) {
-    // Legacy: interval-drift scheduling for jobs without cadencePreset.
     const intervalMs = job.intervalMinutes * 60 * 1000;
     const lastRun = new Date(job.lastRunAt).getTime();
     const nextRun = lastRun + intervalMs;
@@ -190,7 +182,6 @@ export function scheduleJob(job: Job): void {
       `[Scheduler] Job ${job.id} (${job.name}) [legacy] next run in ${Math.round(delayMs / 1000)}s`
     );
   } else {
-    // First ever run — short delay for legacy jobs without cadencePreset.
     delayMs = 5_000;
     console.log(`[Scheduler] Job ${job.id} (${job.name}) first run in ${delayMs / 1000}s`);
   }
@@ -212,10 +203,16 @@ export function scheduleJob(job: Job): void {
       return;
     }
 
-    await executeJob(current);
+    // Enqueue through the global queue — prevents concurrent boundary-trigger bursts.
+    // The queue handles the per-job overlap guard (no double-enqueue).
+    const { enqueued } = enqueue(current.id, current.name, () => executeJob(current));
+    if (!enqueued) {
+      console.log(
+        `[Scheduler] Job ${current.id} (${current.name}) boundary fired but already queued/running — skipping this tick.`
+      );
+    }
 
-    // Reschedule at the next boundary (boundary jobs always call computeNextBoundary
-    // fresh, so no drift accumulates across multiple runs)
+    // Reschedule at next boundary regardless of enqueue result (drift-free)
     scheduleJob(current);
   }, delayMs);
 
@@ -224,24 +221,30 @@ export function scheduleJob(job: Job): void {
 
 export function unscheduleJob(jobId: string): void {
   clearJobTimer(jobId);
-  runningJobs.delete(jobId);
+  // Note: if the job is currently in the queue or running, it will complete
+  // naturally. The queue's per-job guard prevents new enqueues of the same id.
 }
 
 /**
- * Immediately execute a job outside of the scheduler cadence.
- * After the run, reschedules at the next boundary (cadence jobs) or
- * next interval from now (legacy jobs).
+ * Immediately enqueue a job outside of the scheduler cadence.
+ * After enqueuing, reschedules the timer at the next boundary (cadence jobs)
+ * or next interval from now (legacy jobs).
+ *
+ * Returns the queue promise so callers can optionally await completion.
  */
-export async function runJobNow(job: Job, overrides?: JobRunOverrides): Promise<void> {
+export function runJobNow(job: Job, overrides?: JobRunOverrides): Promise<void> {
   // Cancel pending timer so it doesn't double-fire shortly after
   clearJobTimer(job.id);
 
-  await executeJob(job, overrides);
+  // Enqueue the job — queue's overlap guard prevents duplicates
+  const { promise } = enqueue(job.id, job.name, () => executeJob(job, overrides));
 
-  // Reschedule from now — boundary jobs will naturally pick up the next boundary
+  // Reschedule from now — boundary jobs naturally pick up the next boundary
   if (job.enabled) {
     scheduleJob(job);
   }
+
+  return promise;
 }
 
 export async function startScheduler(): Promise<void> {

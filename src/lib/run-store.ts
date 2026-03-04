@@ -7,7 +7,7 @@ export interface RunLog {
   jobId?: string; // undefined for manual runs
   startedAt: string;
   finishedAt?: string;
-  status: 'running' | 'success' | 'error';
+  status: 'queued' | 'running' | 'success' | 'error';
   error?: string;
   channel: string;
   channelName?: string;

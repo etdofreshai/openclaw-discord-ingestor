@@ -383,6 +383,27 @@ Supported patch fields: `name`, `channel`, `cadencePreset`, `sincePreset`, `enab
 
 Delete a scheduled job and cancel its timer.
 
+### `GET /api/scheduler/status`
+
+Get the current scheduler queue state.
+
+```bash
+curl http://localhost:3456/api/scheduler/status \
+  -H "Authorization: Bearer your-token"
+```
+
+Response:
+```json
+{
+  "concurrency": 1,
+  "spacingMs": 1000,
+  "runningIds": [],
+  "queuedIds": [],
+  "runningCount": 0,
+  "queuedCount": 0
+}
+```
+
 ### `GET /api/runs`
 
 Get recent run logs (newest first). Optional `?limit=N` (max 200, default 50).
@@ -426,10 +447,56 @@ New jobs created via the UI or API with `cadencePreset` use boundary-aligned UTC
 - Jobs are loaded from `.data/jobs/jobs.json` on server startup via `startScheduler()`
 - Each enabled job with `cadencePreset` is scheduled for the next UTC boundary via `computeNextBoundary(cadence, now)`
 - Each enabled job without `cadencePreset` (legacy) uses `lastRunAt + intervalMinutes` drift scheduling
-- Overlapping runs of the same job are prevented via an in-memory `Set`
+- Overlapping runs of the same job are prevented via the global queue's per-job guard
 - Editing a job via `PATCH /api/jobs/:id` reschedules its timer automatically
 - Disabling a job cancels its timer immediately
-- `POST /api/jobs/:id/run` fires the job immediately and reschedules for the next boundary
+- `POST /api/jobs/:id/run` enqueues the job and reschedules for the next boundary
+
+### Global Scheduler Queue
+
+All sync operations — scheduled triggers, manual runs, and run-all — go through a shared in-process queue (`scheduler-queue.ts`) before executing. This prevents simultaneous Discord API calls when multiple jobs fire at the same boundary.
+
+**Queue semantics:**
+
+| Behaviour | Detail |
+|-----------|--------|
+| Concurrency | Controlled by `SCHEDULER_CONCURRENCY` (default **1** — single worker) |
+| Job spacing | `SCHEDULER_JOB_SPACING_MS` (default **1000 ms**) — minimum delay after one job finishes before the next starts |
+| FIFO order | Jobs due at the same boundary are enqueued in arrival order and run sequentially |
+| Per-job guard | A job already in the queue or running will not be enqueued again (duplicate boundary ticks are dropped) |
+| Manual runs | `POST /api/sync`, `POST /api/jobs/:id/run`, and `POST /api/jobs/:id/run-all` all go through the queue — they do not bypass it |
+| `/api/sync` | Blocks until the queued job completes and returns the full result (fetched/inserted/updated/skipped counts) |
+
+**Queue status endpoint:**
+
+```
+GET /api/scheduler/status
+```
+
+Returns:
+```json
+{
+  "concurrency": 1,
+  "spacingMs": 1000,
+  "runningIds": ["job-uuid-1"],
+  "queuedIds": ["job-uuid-2", "manual:run-uuid-3"],
+  "runningCount": 1,
+  "queuedCount": 2
+}
+```
+
+The `/sync` page also shows a live **Scheduler Queue** widget (refreshed every 30 s) with running count, queue depth, concurrency, and spacing values.
+
+### Discord 429 Retry / Backoff
+
+`fetchChannelMessages` and `fetchChannelName` in `live-sync.ts` automatically retry on HTTP 429 responses:
+
+- Reads the `Retry-After` (or `X-RateLimit-Reset-After`) header to determine wait time
+- Adds a 500 ms safety buffer on top of the indicated wait
+- Retries up to **3 times** with clear log output on each retry
+- Raises an error after the retry budget is exhausted
+
+This is independent of the queue — rate-limits within a single page fetch are handled inline, while the queue prevents concurrent fetches from multiple jobs firing at once.
 
 ---
 
@@ -457,6 +524,8 @@ All runtime data is stored relative to the server's working directory:
 | `CDP_PORT` | optional | `9222` | Chromium remote debugging port |
 | `PUPPETEER_EXECUTABLE_PATH` | optional | `/usr/bin/chromium` | Path to Chromium binary |
 | `SCHEDULE_SINCE_OVERLAP_PERCENT` | optional | `10` | Extra lookback applied to scheduled `since` runs to avoid edge misses (e.g. `1h` + 10% => 66m). |
+| `SCHEDULER_CONCURRENCY` | optional | `1` | Max concurrent jobs the scheduler queue runs simultaneously. Increase with caution — higher values may trigger Discord 429 rate-limits. |
+| `SCHEDULER_JOB_SPACING_MS` | optional | `1000` | Minimum delay (ms) between jobs after one finishes and before the next starts. Acts as a rate-limit buffer between sequential job runs. |
 
 ---
 
@@ -510,7 +579,8 @@ src/
     ├── live-sync.ts          # Discord API fetch + DB upsert (returns SyncResult)
     ├── job-store.ts          # Job CRUD + .data/jobs/jobs.json persistence
     ├── run-store.ts          # Run log append/query + .data/runs/runs.json persistence
-    ├── scheduler.ts          # Boundary-aligned scheduler (rehydrates on start)
+    ├── scheduler.ts          # Boundary-aligned scheduler (rehydrates on start; enqueues via queue)
+    ├── scheduler-queue.ts    # Global FIFO job queue (concurrency + spacing control)
     ├── since-presets.ts      # SincePreset + CadencePreset types, labels, boundary computation
     └── sync-router.ts        # All /sync and /api/* routes + full-page HTML UI
 ```

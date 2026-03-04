@@ -12,6 +12,7 @@ import {
 } from './job-store.js';
 import { getRecentRuns, createRun, updateRun } from './run-store.js';
 import { scheduleJob, unscheduleJob, runJobNow } from './scheduler.js';
+import { enqueue, getQueueStatus } from './scheduler-queue.js';
 import {
   isSincePreset,
   isCadencePreset,
@@ -59,6 +60,11 @@ router.get('/sync', (_req: Request, res: Response) => {
 });
 
 // ── API: manual sync ────────────────────────────────────────────────────────────
+//
+// Manual syncs go through the global scheduler queue (same as scheduled jobs)
+// to prevent Discord 429 bursts. The HTTP response blocks until the queued job
+// runs and completes, so the response still contains the full sync result.
+// If the queue is busy, the request will wait — this is intentional.
 
 router.post('/api/sync', requireAuth, async (req: Request, res: Response) => {
   const { channel, limit, before, after, sincePreset: sincePresetRaw } = req.body as {
@@ -113,9 +119,10 @@ router.post('/api/sync', requireAuth, async (req: Request, res: Response) => {
   const startedAt = now.toISOString();
   const channelName = await fetchChannelName(session, channel.trim()).catch(() => null);
 
+  // Create run record immediately (status: 'queued' until the worker starts)
   const run = await createRun({
     startedAt,
-    status: 'running',
+    status: 'queued',
     channel: channel.trim(),
     channelName: channelName || undefined,
     params: {
@@ -132,47 +139,67 @@ router.post('/api/sync', requireAuth, async (req: Request, res: Response) => {
     attachmentsSeen: 0,
   });
 
-  const pool = new pg.Pool({ connectionString: databaseUrl });
-  try {
-    const result = await syncChannelToDB(pool, session, channel.trim(), {
-      limit: parsedLimit,
-      before: before?.trim() || undefined,
-      after: effectiveAfter,
-      verbose: false,
-    });
+  // Closure to capture the sync result from within the queue worker
+  let syncResult: { fetched: number; inserted: number; updated: number; skipped: number; attachmentsSeen: number } | null = null;
+  let syncError: string | null = null;
 
-    const finishedAt = new Date().toISOString();
-    await updateRun(run.runId, {
-      finishedAt,
-      status: 'success',
-      fetchedCount: result.fetched,
-      insertedCount: result.inserted,
-      updatedCount: result.updated,
-      skippedCount: result.skipped,
-      attachmentsSeen: result.attachmentsSeen,
-    });
+  // Enqueue the work — use runId as queue key (unique per request, no dedup needed)
+  const { promise } = enqueue(`manual:${run.runId}`, `manual sync #${channel.trim()}`, async () => {
+    await updateRun(run.runId, { status: 'running' });
 
-    res.json({
-      success: true,
-      runId: run.runId,
-      channel: channel.trim(),
-      channelName: channelName || null,
-      user: `${user.username}#${user.discriminator}`,
-      sincePreset: sincePreset ?? null,
-      effectiveAfter: effectiveAfter ?? null,
-      ...result,
-    });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Unknown error';
-    await updateRun(run.runId, {
-      finishedAt: new Date().toISOString(),
-      status: 'error',
-      error: message,
-    });
-    res.status(500).json({ error: message });
-  } finally {
-    await pool.end();
+    const pool = new pg.Pool({ connectionString: databaseUrl });
+    try {
+      const result = await syncChannelToDB(pool, session, channel.trim(), {
+        limit: parsedLimit,
+        before: before?.trim() || undefined,
+        after: effectiveAfter,
+        verbose: false,
+      });
+
+      const finishedAt = new Date().toISOString();
+      await updateRun(run.runId, {
+        finishedAt,
+        status: 'success',
+        fetchedCount: result.fetched,
+        insertedCount: result.inserted,
+        updatedCount: result.updated,
+        skippedCount: result.skipped,
+        attachmentsSeen: result.attachmentsSeen,
+      });
+
+      syncResult = result;
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      await updateRun(run.runId, {
+        finishedAt: new Date().toISOString(),
+        status: 'error',
+        error: message,
+      });
+      syncError = message;
+      throw err; // re-throw so queue logs it
+    } finally {
+      await pool.end();
+    }
+  });
+
+  // Block until the queued job completes (preserves synchronous API response)
+  await promise.catch(() => { /* error captured in syncError */ });
+
+  if (syncError) {
+    res.status(500).json({ error: syncError, runId: run.runId });
+    return;
   }
+
+  res.json({
+    success: true,
+    runId: run.runId,
+    channel: channel.trim(),
+    channelName: channelName || null,
+    user: `${user.username}#${user.discriminator}`,
+    sincePreset: sincePreset ?? null,
+    effectiveAfter: effectiveAfter ?? null,
+    ...(syncResult ?? {}),
+  });
 });
 
 // ── API: jobs ───────────────────────────────────────────────────────────────────
@@ -286,12 +313,13 @@ router.post('/api/jobs/:id/run', requireAuth, async (req: Request, res: Response
     return;
   }
 
-  // Trigger async — respond immediately; result visible in /api/runs
+  // Trigger async through the global queue — respond immediately; result visible in /api/runs.
+  // runJobNow enqueues internally, so the job respects SCHEDULER_CONCURRENCY and spacing.
   runJobNow(job).catch((err: unknown) => {
     console.error(`[API] runJobNow error for job ${job.id}:`, err);
   });
 
-  res.json({ success: true, message: 'Job triggered. Check /api/runs for result.' });
+  res.json({ success: true, message: 'Job enqueued. Check /api/runs for result.' });
 });
 
 router.post('/api/jobs/:id/run-all', requireAuth, async (req: Request, res: Response) => {
@@ -302,8 +330,8 @@ router.post('/api/jobs/:id/run-all', requireAuth, async (req: Request, res: Resp
     return;
   }
 
-  // Run one-shot full backfill for this channel.
-  // Use since=all and a very large logical limit; sync paginates internally.
+  // Run one-shot full backfill for this channel via the queue.
+  // Uses since=all and a very large logical limit; sync paginates internally.
   runJobNow(job, {
     sincePreset: 'all',
     limit: 10_000_000_000,
@@ -313,7 +341,13 @@ router.post('/api/jobs/:id/run-all', requireAuth, async (req: Request, res: Resp
     console.error(`[API] run-all error for job ${job.id}:`, err);
   });
 
-  res.json({ success: true, message: 'Run-all triggered. Check /api/runs for progress/result.' });
+  res.json({ success: true, message: 'Run-all enqueued. Check /api/runs for progress/result.' });
+});
+
+// ── API: scheduler queue status ─────────────────────────────────────────────────
+
+router.get('/api/scheduler/status', requireAuth, (_req: Request, res: Response) => {
+  res.json(getQueueStatus());
 });
 
 router.patch('/api/jobs/:id', requireAuth, async (req: Request, res: Response) => {
@@ -522,6 +556,13 @@ tbody tr:hover td{background:rgba(255,255,255,.03)}
 .field-disabled input,.field-disabled select{opacity:.45;cursor:not-allowed}
 .field-disabled label{opacity:.6}
 .since-override-note{font-size:.74rem;color:#f59e0b;margin-top:4px;display:none}
+/* queue widget */
+.queue-row{display:flex;gap:20px;flex-wrap:wrap;align-items:center}
+.queue-stat{display:flex;flex-direction:column;align-items:center;gap:2px}
+.queue-stat .qs-value{font-size:1.4rem;font-weight:700;color:#fff;line-height:1}
+.queue-stat .qs-label{font-size:.68rem;text-transform:uppercase;letter-spacing:.06em;color:#666}
+.queue-ids{font-size:.76rem;color:#9ca3af;margin-top:8px;line-height:1.5}
+.queue-ids strong{color:#ccc}
 .field-disabled .since-override-note{display:block}
 /* auto-name preview */
 .auto-name-preview{font-size:.78rem;color:#7289da;margin-top:4px;min-height:1.1em}
@@ -573,6 +614,15 @@ tbody tr:hover td{background:rgba(255,255,255,.03)}
       <button class="btn btn-sm btn-ghost" onclick="clearSavedToken()">Clear Token</button>
     </div>
   </div>
+</div>
+
+<!-- ── Scheduler Queue Status Widget ── -->
+<div class="card" id="queue-card">
+  <div class="card-header">
+    <span class="card-title">⚙️ Scheduler Queue</span>
+    <button class="btn btn-sm btn-ghost" onclick="loadQueueStatus()">↻ Refresh</button>
+  </div>
+  <div id="queue-status-container" style="font-size:.82rem;color:#aaa">Loading…</div>
 </div>
 
 <!-- ── New Sync Card ── -->
@@ -1257,6 +1307,7 @@ function renderRunsTable(runs) {
   let rows = runs.map(r => {
     const statusPill = r.status === 'success' ? '<span class="status-pill pill-ok">success</span>'
       : r.status === 'error' ? '<span class="status-pill pill-err">error</span>'
+      : r.status === 'queued' ? '<span class="status-pill pill-blue">queued</span>'
       : '<span class="status-pill pill-run">running</span>';
     const source = r.jobId ? '<span class="mono" title="Job ID: ' + esc(r.jobId) + '">scheduled</span>' : 'manual';
     const errCell = r.error ? '<span class="err-text" title="' + esc(r.error) + '">' + esc(r.error.slice(0, 40)) + (r.error.length > 40 ? '…' : '') + '</span>' : '—';
@@ -1305,6 +1356,34 @@ function reltime(iso) {
   return Math.round(diff/86400000) + 'd ago';
 }
 
+// ── Scheduler queue status ──────────────────────────────────────────────────
+async function loadQueueStatus() {
+  const el = document.getElementById('queue-status-container');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/scheduler/status', { headers: getHeaders() });
+    if (res.status === 401) { el.innerHTML = '<span style="color:#f87171">Not authenticated.</span>'; return; }
+    const d = await res.json();
+    const runningList = d.runningIds && d.runningIds.length
+      ? d.runningIds.map(function(id) { return '<span class="status-pill pill-run">' + esc(id) + '</span>'; }).join(' ')
+      : '<span style="color:#555">none</span>';
+    const queuedList = d.queuedIds && d.queuedIds.length
+      ? d.queuedIds.map(function(id) { return '<span class="status-pill pill-blue">' + esc(id) + '</span>'; }).join(' ')
+      : '<span style="color:#555">none</span>';
+    el.innerHTML =
+      '<div class="queue-row">' +
+        '<div class="queue-stat"><div class="qs-value">' + esc(d.runningCount) + '</div><div class="qs-label">Running</div></div>' +
+        '<div class="queue-stat"><div class="qs-value">' + esc(d.queuedCount) + '</div><div class="qs-label">Queued</div></div>' +
+        '<div class="queue-stat"><div class="qs-value">' + esc(d.concurrency) + '</div><div class="qs-label">Concurrency</div></div>' +
+        '<div class="queue-stat"><div class="qs-value">' + esc(d.spacingMs) + 'ms</div><div class="qs-label">Spacing</div></div>' +
+      '</div>' +
+      '<div class="queue-ids"><strong>Running:</strong> ' + runningList + '</div>' +
+      (d.queuedCount > 0 ? '<div class="queue-ids"><strong>Waiting:</strong> ' + queuedList + '</div>' : '');
+  } catch (err) {
+    if (el) el.innerHTML = '<span style="color:#f87171">Error: ' + esc(err.message) + '</span>';
+  }
+}
+
 // ── Init ────────────────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
   updateAuthBar();
@@ -1319,6 +1398,7 @@ window.addEventListener('DOMContentLoaded', () => {
   } else {
     loadJobsTable();
     loadRunsTable();
+    loadQueueStatus();
   }
 
   // Auto-refresh every 30s
@@ -1326,6 +1406,7 @@ window.addEventListener('DOMContentLoaded', () => {
     if (REQUIRES_AUTH && !getToken()) return;
     loadJobsTable();
     loadRunsTable();
+    loadQueueStatus();
   }, 30000);
 });
 </script>
