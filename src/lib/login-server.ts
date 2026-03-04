@@ -595,7 +595,7 @@ function connectWs() {
         showOverlay('✅ Login successful! Redirecting…');
         document.getElementById('start-btn').disabled = false;
         if (ws) { try { ws.close(); } catch {} ws = null; }
-        setTimeout(() => { window.location.href = '/'; }, 3000);
+        setTimeout(() => { window.location.href = '/sync'; }, 1500);
       }
     } catch(e) {}
   };
