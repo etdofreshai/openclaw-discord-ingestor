@@ -14,6 +14,7 @@ export const SINCE_PRESETS = [
   '1w', '2w',
   '1mo', '2mo', '3mo', '4mo', '6mo',
   '1y',
+  'all',
 ] as const;
 
 export type SincePreset = typeof SINCE_PRESETS[number];
@@ -36,6 +37,7 @@ export const SINCE_PRESET_LABELS: Record<SincePreset, string> = {
   '4mo': '4 months',
   '6mo': '6 months',
   '1y': '1 year',
+  'all': 'All time',
 };
 
 /** Milliseconds for each preset. Months/year use calendar approximations. */
@@ -61,6 +63,7 @@ function presetToMs(preset: SincePreset): number {
     case '4mo':  return 120 * DAY;
     case '6mo':  return 180 * DAY;
     case '1y':   return 365 * DAY;
+    case 'all':  return Number.MAX_SAFE_INTEGER;
   }
 }
 
