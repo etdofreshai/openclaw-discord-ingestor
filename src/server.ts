@@ -2,14 +2,21 @@ import 'dotenv/config';
 import http from 'http';
 import express from 'express';
 import loginRouter, { handleDiscordLoginWs } from './lib/login-server.js';
+import syncRouter from './lib/sync-router.js';
 
 const app = express();
 const server = http.createServer(app);
 
 const PORT = parseInt(process.env.LOGIN_SERVER_PORT || '3456', 10);
 
+// Parse JSON request bodies (required for /api/sync)
+app.use(express.json());
+
 // Login server routes
 app.use(loginRouter);
+
+// Sync UI + API routes (protected by UI_TOKEN)
+app.use(syncRouter);
 
 // Health check
 app.get('/', (_req, res) => {
@@ -20,6 +27,8 @@ app.get('/', (_req, res) => {
       login: '/discord-login',
       status: '/discord-login/status',
       validate: '/discord-login/validate',
+      syncUi: '/sync',
+      syncApi: '/api/sync',
     },
   });
 });
@@ -38,4 +47,5 @@ server.on('upgrade', (req, socket, head) => {
 server.listen(PORT, () => {
   console.log(`[Discord Login Server] Running on http://localhost:${PORT}`);
   console.log(`[Discord Login Server] Login UI: http://localhost:${PORT}/discord-login`);
+  console.log(`[Discord Login Server] Sync UI:  http://localhost:${PORT}/sync`);
 });

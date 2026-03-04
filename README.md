@@ -35,9 +35,63 @@ Create `.env`:
 DATABASE_URL=postgresql://postgres:password@host:5432/postgres
 LOGIN_SERVER_PORT=3456
 CDP_PORT=9222
+UI_TOKEN=your-secret-token-here
 ```
 
 ## Usage
+
+### 0. Web UI — Sync Interface
+
+After starting the server, a protected web interface is available at:
+
+```
+http://localhost:3456/sync
+```
+
+It lets you trigger live syncs without the CLI by filling in:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| Channel ID | ✅ | Numeric Discord channel ID (right-click channel → Copy Channel ID) |
+| Limit | optional | Max messages to fetch (1–100, default 100) |
+| After | optional | Fetch messages after this message ID (for incremental syncs) |
+| Before | optional | Fetch messages before this message ID (for paginating backwards) |
+
+**Auth:** All requests to `/sync` and `/api/sync` require the `UI_TOKEN` env var to be set.  
+The page stores your token in browser `localStorage` so you only have to enter it once.
+
+To access the page via a query param (e.g. in a bookmarked URL):
+
+```
+http://localhost:3456/sync?token=your-secret-token-here
+```
+
+To trigger a sync programmatically:
+
+```bash
+curl -X POST http://localhost:3456/api/sync \
+  -H "Authorization: Bearer your-secret-token-here" \
+  -H "Content-Type: application/json" \
+  -d '{"channel":"123456789012345678","limit":50}'
+
+# With after/before filters
+curl -X POST http://localhost:3456/api/sync \
+  -H "Authorization: Bearer your-secret-token-here" \
+  -H "Content-Type: application/json" \
+  -d '{"channel":"123456789012345678","after":"987654321098765432"}'
+```
+
+Returns JSON:
+
+```json
+{
+  "success": true,
+  "channel": "123456789012345678",
+  "user": "username#0",
+  "fetched": 47,
+  "upserted": 47
+}
+```
 
 ### 1. JSON Import
 
@@ -99,17 +153,20 @@ npm run sync -- --channel 123456789012345678 --before 987654321098765432 --limit
 
 ## Environment Variables
 
-- `DATABASE_URL` : PostgreSQL connection string (required for all commands)
-- `LOGIN_SERVER_PORT` : Port for login server (default: 3456)
-- `CDP_PORT` : Chromium remote debugging port (default: 9222)
-- `PUPPETEER_EXECUTABLE_PATH` : Path to Chromium binary (default: /usr/bin/chromium)
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `DATABASE_URL` | ✅ | — | PostgreSQL connection string |
+| `UI_TOKEN` | ✅ | — | Secret token required to access `/sync` and `POST /api/sync`. Set to any strong random string. |
+| `LOGIN_SERVER_PORT` | optional | `3456` | Port for the Express server |
+| `CDP_PORT` | optional | `9222` | Chromium remote debugging port |
+| `PUPPETEER_EXECUTABLE_PATH` | optional | `/usr/bin/chromium` | Path to Chromium binary |
 
 ## Architecture
 
 ```
 src/
 ├── index.ts              # JSON import CLI
-├── server.ts             # Login server entry point
+├── server.ts             # Express server entry point (login + sync)
 ├── commands/
 │   └── live-sync.ts      # Live sync CLI
 └── lib/
@@ -117,7 +174,8 @@ src/
     ├── session.ts        # Session persistence
     ├── token-validator.ts # Discord API validation
     ├── login-server.ts   # Express + WebSocket login UI
-    └── live-sync.ts      # Discord API message sync
+    ├── live-sync.ts      # Discord API message sync
+    └── sync-router.ts    # Authenticated sync web UI + /api/sync endpoint
 ```
 
 ## ⚠️ Security Notice
