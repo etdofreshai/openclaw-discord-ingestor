@@ -42,7 +42,13 @@ export interface Job {
   lastStatus?: 'success' | 'error' | 'running';
 }
 
-const DATA_DIR = path.resolve(process.cwd(), '.data', 'jobs');
+const DATA_ROOT = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : (process.env.NODE_ENV === 'production'
+      ? '/app/.data'
+      : path.resolve(process.cwd(), '.data'));
+
+const DATA_DIR = path.join(DATA_ROOT, 'jobs');
 const JOBS_FILE = path.join(DATA_DIR, 'jobs.json');
 
 async function ensureDir(): Promise<void> {
@@ -53,7 +59,11 @@ export async function loadJobs(): Promise<Job[]> {
   try {
     const raw = await fs.readFile(JOBS_FILE, 'utf8');
     return JSON.parse(raw) as Job[];
-  } catch {
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[job-store] Failed to read/parse jobs from ${JOBS_FILE}: ${message}`);
+    }
     return [];
   }
 }
