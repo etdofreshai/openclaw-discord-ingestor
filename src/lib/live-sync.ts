@@ -35,6 +35,27 @@ export interface SyncResult {
   attachmentsSeen: number;
 }
 
+export async function fetchChannelName(
+  session: DiscordSession,
+  channelId: string
+): Promise<string | null> {
+  const res = await fetch(`https://discord.com/api/v10/channels/${channelId}`, {
+    headers: {
+      Authorization: session.token,
+    },
+  });
+
+  if (!res.ok) return null;
+
+  const data = (await res.json()) as { name?: string; id?: string; type?: number; recipients?: Array<{ username?: string }> };
+  if (data.name && data.name.trim()) return data.name.trim();
+  if (Array.isArray(data.recipients) && data.recipients.length > 0) {
+    const names = data.recipients.map(r => r.username).filter(Boolean) as string[];
+    if (names.length) return names.join(', ');
+  }
+  return data.id || null;
+}
+
 export async function fetchChannelMessages(
   session: DiscordSession,
   channelId: string,

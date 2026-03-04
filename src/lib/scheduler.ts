@@ -3,7 +3,7 @@ import { loadJobs, updateJob, type Job } from './job-store.js';
 import { createRun, updateRun } from './run-store.js';
 import { loadSession } from './session.js';
 import { validateToken } from './token-validator.js';
-import { syncChannelToDB } from './live-sync.js';
+import { syncChannelToDB, fetchChannelName } from './live-sync.js';
 import { resolveSincePreset } from './since-presets.js';
 
 // Track which jobs are currently executing (prevent overlapping runs)
@@ -57,11 +57,14 @@ async function executeJob(job: Job): Promise<void> {
   const startedAt = now.toISOString();
   await updateJob(job.id, { lastStatus: 'running', lastRunAt: startedAt });
 
+  const channelName = await fetchChannelName(session, job.channel).catch(() => null);
+
   const run = await createRun({
     jobId: job.id,
     startedAt,
     status: 'running',
     channel: job.channel,
+    channelName: channelName || undefined,
     params: {
       limit: job.limit,
       after: job.after,

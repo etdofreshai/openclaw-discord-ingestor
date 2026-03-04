@@ -10,6 +10,7 @@ export interface RunLog {
   status: 'running' | 'success' | 'error';
   error?: string;
   channel: string;
+  channelName?: string;
   params: {
     limit?: number;
     /** Static after-message-ID provided by caller (may be overridden by sincePreset). */

@@ -2,7 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import pg from 'pg';
 import { loadSession } from './session.js';
 import { validateToken } from './token-validator.js';
-import { syncChannelToDB } from './live-sync.js';
+import { syncChannelToDB, fetchChannelName } from './live-sync.js';
 import {
   loadJobs,
   createJob,
@@ -104,10 +104,13 @@ router.post('/api/sync', requireAuth, async (req: Request, res: Response) => {
     : staticAfter;
 
   const startedAt = now.toISOString();
+  const channelName = await fetchChannelName(session, channel.trim()).catch(() => null);
+
   const run = await createRun({
     startedAt,
     status: 'running',
     channel: channel.trim(),
+    channelName: channelName || undefined,
     params: {
       limit: parsedLimit,
       after: staticAfter,
@@ -146,6 +149,7 @@ router.post('/api/sync', requireAuth, async (req: Request, res: Response) => {
       success: true,
       runId: run.runId,
       channel: channel.trim(),
+      channelName: channelName || null,
       user: `${user.username}#${user.discriminator}`,
       sincePreset: sincePreset ?? null,
       effectiveAfter: effectiveAfter ?? null,
@@ -845,10 +849,13 @@ function renderRunsTable(runs) {
     const sinceCell = r.params && r.params.sincePreset
       ? \`<span class="status-pill pill-run" title="effectiveAfter: \${esc(r.params.effectiveAfter || '')}">\${esc(r.params.sincePreset)}</span>\`
       : (r.params && r.params.after ? \`<span class="mono" style="font-size:.72rem" title="\${esc(r.params.after)}">\${esc(r.params.after.slice(0,12))}…</span>\` : '—');
+    const channelCell = r.channelName
+      ? \`<div style="display:flex;flex-direction:column;line-height:1.2"><span>\${esc(r.channelName)}</span><span class="mono" style="font-size:.72rem;color:#9ca3af">\${esc(r.channel)}</span></div>\`
+      : \`<span class="mono">\${esc(r.channel)}</span>\`;
     return \`<tr>
       <td title="\${esc(r.startedAt)}">\${reltime(r.startedAt)}</td>
       <td>\${source}</td>
-      <td><span class="mono">\${esc(r.channel)}</span></td>
+      <td>\${channelCell}</td>
       <td>\${statusPill}</td>
       <td>\${sinceCell}</td>
       <td>\${r.fetchedCount}</td>
