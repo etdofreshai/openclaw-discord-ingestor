@@ -129,7 +129,55 @@ export async function syncChannelToDB(
   channelId: string,
   options?: { limit?: number; before?: string; after?: string; verbose?: boolean }
 ): Promise<SyncResult> {
-  const messages = await fetchChannelMessages(session, channelId, options);
+  const requested = Math.max(1, options?.limit || 100);
+
+  const messages: DiscordAPIMessage[] = [];
+  const seenIds = new Set<string>();
+
+  // Pagination strategy:
+  // - Default / before-mode: paginate backwards using `before` cursor
+  // - after-mode (no before): paginate forwards using `after` cursor
+  let cursorBefore = options?.before;
+  let cursorAfter = options?.after;
+
+  while (messages.length < requested) {
+    const remaining = requested - messages.length;
+    const page = await fetchChannelMessages(session, channelId, {
+      limit: Math.min(remaining, 100),
+      before: cursorBefore,
+      after: cursorAfter,
+    });
+
+    if (page.length === 0) break;
+
+    for (const msg of page) {
+      if (!seenIds.has(msg.id)) {
+        seenIds.add(msg.id);
+        messages.push(msg);
+      }
+    }
+
+    // Advance cursor for next page
+    if (cursorAfter && !cursorBefore) {
+      // forward pagination: move `after` to newest id seen on this page
+      let maxId = page[0]?.id;
+      for (const m of page) {
+        if (maxId === undefined || BigInt(m.id) > BigInt(maxId)) maxId = m.id;
+      }
+      cursorAfter = maxId;
+    } else {
+      // backward pagination: move `before` to oldest id seen on this page
+      let minId = page[0]?.id;
+      for (const m of page) {
+        if (minId === undefined || BigInt(m.id) < BigInt(minId)) minId = m.id;
+      }
+      cursorBefore = minId;
+    }
+
+    // Safety break if page was short; likely reached boundary
+    if (page.length < Math.min(remaining, 100)) break;
+  }
+
   const normalized = messages.map(normalize);
 
   const sourceId = await ensureSourceId(pool);
