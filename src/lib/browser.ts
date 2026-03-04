@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'child_process';
 import { resolve } from 'path';
 import http from 'http';
 
-const PROFILE_DIR = resolve(process.cwd(), '.chrome-profile');
+const PROFILE_DIR = resolve(process.cwd(), '.data', 'chrome-profile');
 const CHROMIUM_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
 const CDP_PORT = parseInt(process.env.CDP_PORT || '9222', 10);
 const CDP_BASE = `http://localhost:${CDP_PORT}`;

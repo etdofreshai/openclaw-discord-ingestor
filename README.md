@@ -18,7 +18,7 @@ Imports Discord messages into the existing OpenClaw PostgreSQL `messages` table 
 
 ### Live Sync
 - Browser-driven login capture via Chromium
-- Token persisted locally (`.chrome-profile/discord-session.json`)
+- Token persisted locally (`.data/chrome-profile/discord-session.json`)
 - Token validation against Discord API `/users/@me`
 - Pull messages from any channel ID
 - Idempotent upsert into messages table
@@ -297,9 +297,9 @@ All runtime data is stored relative to the server's working directory (the proje
 |------|----------|
 | `.data/jobs/jobs.json` | All scheduled jobs (JSON array) |
 | `.data/runs/runs.json` | Run log history (JSON array, capped at 200 entries) |
-| `.chrome-profile/discord-session.json` | Captured Discord session token |
+| `.data/chrome-profile/discord-session.json` | Captured Discord session token |
 
-Both `.data/` and `.chrome-profile/` are listed in `.gitignore`.
+`.data/` is listed in `.gitignore` and should be mounted as a persistent volume in Docker.
 
 ---
 
@@ -359,7 +359,7 @@ src/
 │   └── live-sync.ts          # Live sync CLI command
 └── lib/
     ├── browser.ts            # Chromium CDP helpers
-    ├── session.ts            # Discord session persistence (.chrome-profile/)
+    ├── session.ts            # Discord session persistence (.data/chrome-profile/)
     ├── token-validator.ts    # Discord API token validation
     ├── login-server.ts       # Login UI + WebSocket screencast + CDP token capture
     ├── live-sync.ts          # Discord API fetch + DB upsert (returns SyncResult)
@@ -397,6 +397,6 @@ npm run typecheck
 **Discord user tokens are sensitive.** They provide full access to your account.
 
 - Never share your token
-- Session stored locally at `.chrome-profile/discord-session.json` (gitignored)
+- Session stored locally at `.data/chrome-profile/discord-session.json` (gitignored)
 - `UI_TOKEN` protects the sync API; use a strong random string
 - If your token is compromised, change your Discord password immediately

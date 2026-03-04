@@ -8,7 +8,7 @@ export interface DiscordSession {
   capturedAt: string;
 }
 
-const SESSION_FILE = path.resolve(process.cwd(), '.chrome-profile', 'discord-session.json');
+const SESSION_FILE = path.resolve(process.cwd(), '.data', 'chrome-profile', 'discord-session.json');
 
 export async function loadSession(): Promise<DiscordSession | null> {
   try {
