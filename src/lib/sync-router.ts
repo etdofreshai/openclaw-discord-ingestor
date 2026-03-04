@@ -293,6 +293,28 @@ router.post('/api/jobs/:id/run', requireAuth, async (req: Request, res: Response
   res.json({ success: true, message: 'Job triggered. Check /api/runs for result.' });
 });
 
+router.post('/api/jobs/:id/run-all', requireAuth, async (req: Request, res: Response) => {
+  const id = String(req.params.id);
+  const job = await getJob(id);
+  if (!job) {
+    res.status(404).json({ error: 'Job not found.' });
+    return;
+  }
+
+  // Run one-shot full backfill for this channel.
+  // Use since=all and a very large logical limit; sync paginates internally.
+  runJobNow(job, {
+    sincePreset: 'all',
+    limit: 10_000_000_000,
+    before: undefined,
+    after: undefined,
+  }).catch((err: unknown) => {
+    console.error(`[API] run-all error for job ${job.id}:`, err);
+  });
+
+  res.json({ success: true, message: 'Run-all triggered. Check /api/runs for progress/result.' });
+});
+
 router.patch('/api/jobs/:id', requireAuth, async (req: Request, res: Response) => {
   const {
     name,
@@ -947,6 +969,7 @@ function renderJobsTable(jobs) {
       <td>\${statusPill}</td>
       <td><div class="actions">
         <button class="btn btn-sm btn-run" onclick="triggerJobRun('\${esc(j.id)}', this)">▶ Run</button>
+        <button class="btn btn-sm btn-primary" onclick="triggerJobRunAll('\${esc(j.id)}', this)">⟳ Run All</button>
         <button class="btn btn-sm \${toggleClass}" onclick="toggleJob('\${esc(j.id)}', \${!j.enabled}, this)">\${toggleLabel}</button>
         <button class="btn btn-sm btn-danger" onclick="removeJob('\${esc(j.id)}', this)">✕</button>
       </div></td>
@@ -967,6 +990,29 @@ async function triggerJobRun(id, btn) {
   btn.innerHTML = '<span class="spinner"></span>';
   try {
     const res = await fetch('/api/jobs/' + id + '/run', { method: 'POST', headers: getHeaders() });
+    const data = await res.json();
+    if (res.ok) {
+      btn.textContent = '✓';
+      setTimeout(() => { btn.textContent = orig; btn.disabled = false; loadJobsTable(); loadRunsTable(); }, 1500);
+    } else {
+      alert('Error: ' + (data.error || 'Unknown'));
+      btn.textContent = orig;
+      btn.disabled = false;
+    }
+  } catch (err) {
+    alert('Network error: ' + err.message);
+    btn.textContent = orig;
+    btn.disabled = false;
+  }
+}
+
+async function triggerJobRunAll(id, btn) {
+  if (!confirm('Run ALL history for this channel now? This can take a while.')) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>';
+  try {
+    const res = await fetch('/api/jobs/' + id + '/run-all', { method: 'POST', headers: getHeaders() });
     const data = await res.json();
     if (res.ok) {
       btn.textContent = '✓';

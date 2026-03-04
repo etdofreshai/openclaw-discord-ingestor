@@ -19,7 +19,14 @@ function clearJobTimer(jobId: string): void {
   }
 }
 
-async function executeJob(job: Job): Promise<void> {
+type JobRunOverrides = {
+  limit?: number;
+  before?: string;
+  after?: string;
+  sincePreset?: Job['sincePreset'];
+};
+
+async function executeJob(job: Job, overrides?: JobRunOverrides): Promise<void> {
   if (runningJobs.has(job.id)) {
     console.log(`[Scheduler] Job ${job.id} (${job.name}) already running — skipping overlap.`);
     return;
@@ -50,9 +57,14 @@ async function executeJob(job: Job): Promise<void> {
   // Resolve sincePreset → effective after snowflake at runtime.
   // Precedence: sincePreset overrides explicit `after` when both are set.
   const now = new Date();
-  const effectiveAfter = job.sincePreset
-    ? resolveSincePreset(job.sincePreset, now)
-    : job.after;
+  const runSincePreset = overrides?.sincePreset ?? job.sincePreset;
+  const runAfter = overrides?.after ?? job.after;
+  const runBefore = overrides?.before ?? job.before;
+  const runLimit = overrides?.limit ?? job.limit;
+
+  const effectiveAfter = runSincePreset
+    ? resolveSincePreset(runSincePreset, now)
+    : runAfter;
 
   const startedAt = now.toISOString();
   await updateJob(job.id, { lastStatus: 'running', lastRunAt: startedAt });
@@ -66,10 +78,10 @@ async function executeJob(job: Job): Promise<void> {
     channel: job.channel,
     channelName: channelName || undefined,
     params: {
-      limit: job.limit,
-      after: job.after,
-      before: job.before,
-      sincePreset: job.sincePreset,
+      limit: runLimit,
+      after: runAfter,
+      before: runBefore,
+      sincePreset: runSincePreset,
       effectiveAfter,
     },
     fetchedCount: 0,
@@ -85,12 +97,12 @@ async function executeJob(job: Job): Promise<void> {
     console.log(
       `[Scheduler] Starting job ${job.id} (${job.name}) — channel ${job.channel}` +
       (job.cadencePreset ? ` — cadence=${job.cadencePreset}` : '') +
-      (job.sincePreset ? ` — since=${job.sincePreset} (after=${effectiveAfter})` : '')
+      (runSincePreset ? ` — since=${runSincePreset} (after=${effectiveAfter})` : '')
     );
 
     const result = await syncChannelToDB(pool, session, job.channel, {
-      limit: job.limit,
-      before: job.before,
+      limit: runLimit,
+      before: runBefore,
       after: effectiveAfter,
       verbose: true,
     });
@@ -211,11 +223,11 @@ export function unscheduleJob(jobId: string): void {
  * After the run, reschedules at the next boundary (cadence jobs) or
  * next interval from now (legacy jobs).
  */
-export async function runJobNow(job: Job): Promise<void> {
+export async function runJobNow(job: Job, overrides?: JobRunOverrides): Promise<void> {
   // Cancel pending timer so it doesn't double-fire shortly after
   clearJobTimer(job.id);
 
-  await executeJob(job);
+  await executeJob(job, overrides);
 
   // Reschedule from now — boundary jobs will naturally pick up the next boundary
   if (job.enabled) {
