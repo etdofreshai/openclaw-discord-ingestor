@@ -111,6 +111,10 @@ The **Since** dropdown lets you specify a relative lookback window instead of a 
 | `4mo` | Last ~120 days |
 | `6mo` | Last ~180 days |
 | `1y` | Last ~365 days |
+| `3y` | Last ~3 years |
+| `5y` | Last ~5 years |
+| `10y` | Last ~10 years |
+| `20y` | Last ~20 years |
 | `all` | All time (from beginning) |
 
 **How it works:** At run time, the preset is resolved to an effective "after" Discord snowflake ID by computing `now − presetMs`. This snowflake is passed to the Discord messages API as the `after` parameter.
@@ -202,7 +206,7 @@ Response:
 }
 ```
 
-Valid `sincePreset` values: `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `12h`, `1d`, `3d`, `1w`, `2w`, `1mo`, `2mo`, `3mo`, `4mo`, `6mo`, `1y`, `all`
+Valid `sincePreset` values: `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `12h`, `1d`, `3d`, `1w`, `2w`, `1mo`, `2mo`, `3mo`, `4mo`, `6mo`, `1y`, `3y`, `5y`, `10y`, `20y`, `all`
 
 ### `GET /api/jobs`
 

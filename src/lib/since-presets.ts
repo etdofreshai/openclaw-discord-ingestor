@@ -13,7 +13,7 @@ export const SINCE_PRESETS = [
   '1d', '3d',
   '1w', '2w',
   '1mo', '2mo', '3mo', '4mo', '6mo',
-  '1y',
+  '1y', '3y', '5y', '10y', '20y',
   'all',
 ] as const;
 
@@ -37,6 +37,10 @@ export const SINCE_PRESET_LABELS: Record<SincePreset, string> = {
   '4mo': '4 months',
   '6mo': '6 months',
   '1y': '1 year',
+  '3y': '3 years',
+  '5y': '5 years',
+  '10y': '10 years',
+  '20y': '20 years',
   'all': 'All time',
 };
 
@@ -63,6 +67,10 @@ function presetToMs(preset: SincePreset): number {
     case '4mo':  return 120 * DAY;
     case '6mo':  return 180 * DAY;
     case '1y':   return 365 * DAY;
+    case '3y':   return 3 * 365 * DAY;
+    case '5y':   return 5 * 365 * DAY;
+    case '10y':  return 10 * 365 * DAY;
+    case '20y':  return 20 * 365 * DAY;
     case 'all':  return Number.MAX_SAFE_INTEGER;
   }
 }
