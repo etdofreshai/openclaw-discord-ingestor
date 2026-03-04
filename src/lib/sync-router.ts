@@ -11,8 +11,8 @@ const router = Router();
 function requireAuth(req: Request, res: Response, next: NextFunction): void {
   const uiToken = process.env.UI_TOKEN;
   if (!uiToken) {
-    // If UI_TOKEN is not configured, block all access
-    res.status(503).json({ error: 'UI_TOKEN env var is not configured on this server.' });
+    // Auth disabled mode: allow access when UI_TOKEN is unset
+    next();
     return;
   }
 
@@ -152,8 +152,8 @@ const SYNC_UI_HTML = /* html */ `<!DOCTYPE html>
 <div class="card">
   <h2>🔑 Auth Token</h2>
   <div class="field">
-    <label>UI Token <span class="required-badge">required</span></label>
-    <p class="field-hint">The <code>UI_TOKEN</code> value configured on this server. Saved to browser localStorage.</p>
+    <label>UI Token <span class="optional-badge">optional</span></label>
+    <p class="field-hint">Only needed when server-side <code>UI_TOKEN</code> is configured. If auth is disabled, leave blank.</p>
     <div class="token-row">
       <input type="password" id="ui-token" placeholder="Paste your UI_TOKEN here" autocomplete="current-password"/>
       <button class="save-btn" onclick="saveToken()">Save</button>
@@ -197,6 +197,8 @@ const SYNC_UI_HTML = /* html */ `<!DOCTYPE html>
 <div id="result"></div>
 
 <script>
+const REQUIRES_AUTH = ${process.env.UI_TOKEN ? 'true' : 'false'};
+
 // Load saved token from localStorage
 const TOKEN_KEY = 'discord_sync_ui_token';
 window.addEventListener('DOMContentLoaded', () => {
@@ -216,7 +218,7 @@ async function runSync(event) {
   event.preventDefault();
 
   const token = document.getElementById('ui-token').value.trim();
-  if (!token) {
+  if (REQUIRES_AUTH && !token) {
     showError('Please enter your UI Token above.');
     return;
   }
@@ -244,12 +246,12 @@ async function runSync(event) {
     if (after) body.after = after;
     if (before) body.before = before;
 
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+
     const res = await fetch('/api/sync', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + token,
-      },
+      headers,
       body: JSON.stringify(body),
     });
 

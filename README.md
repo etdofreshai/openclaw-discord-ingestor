@@ -35,6 +35,7 @@ Create `.env`:
 DATABASE_URL=postgresql://postgres:password@host:5432/postgres
 LOGIN_SERVER_PORT=3456
 CDP_PORT=9222
+# Optional: if set, /sync and /api/sync require Bearer token auth
 UI_TOKEN=your-secret-token-here
 ```
 
@@ -57,8 +58,8 @@ It lets you trigger live syncs without the CLI by filling in:
 | After | optional | Fetch messages after this message ID (for incremental syncs) |
 | Before | optional | Fetch messages before this message ID (for paginating backwards) |
 
-**Auth:** All requests to `/sync` and `/api/sync` require the `UI_TOKEN` env var to be set.  
-The page stores your token in browser `localStorage` so you only have to enter it once.
+**Auth:** If `UI_TOKEN` is set, `/sync` and `/api/sync` require it. If `UI_TOKEN` is unset, auth is disabled.
+The page stores your token in browser `localStorage` so you only have to enter it once when auth is enabled.
 
 To access the page via a query param (e.g. in a bookmarked URL):
 
@@ -156,7 +157,7 @@ npm run sync -- --channel 123456789012345678 --before 987654321098765432 --limit
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `DATABASE_URL` | ✅ | — | PostgreSQL connection string |
-| `UI_TOKEN` | ✅ | — | Secret token required to access `/sync` and `POST /api/sync`. Set to any strong random string. |
+| `UI_TOKEN` | optional | — | If set, required to access `/sync` and `POST /api/sync` (Bearer token). If unset, UI/API are open. |
 | `LOGIN_SERVER_PORT` | optional | `3456` | Port for the Express server |
 | `CDP_PORT` | optional | `9222` | Chromium remote debugging port |
 | `PUPPETEER_EXECUTABLE_PATH` | optional | `/usr/bin/chromium` | Path to Chromium binary |
