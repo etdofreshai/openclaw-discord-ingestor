@@ -575,7 +575,7 @@ function connectWs() {
         if (ws) { try { ws.close(); } catch {} ws = null; }
         setTimeout(() => { window.location.href = '/'; }, 3000);
       }
-    } catch(e {}
+    } catch(e) {}
   };
   ws.onclose = () => { console.log('[WS] Disconnected from screencast'); };
   ws.onerror = (e) => { console.error('[WS] Error', e); };
