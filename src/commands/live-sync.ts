@@ -1,8 +1,8 @@
 import 'dotenv/config';
-import pg from 'pg';
 import { loadSession } from '../lib/session.js';
 import { validateToken } from '../lib/token-validator.js';
-import { syncChannelToDB } from '../lib/live-sync.js';
+import { syncChannel } from '../lib/live-sync.js';
+import { isApiMode } from '../lib/api-writer.js';
 
 type Cli = {
   channel: string;
@@ -34,9 +34,13 @@ function parseArgs(argv: string[]): Cli {
 
 async function main(): Promise<void> {
   const cli = parseArgs(process.argv);
-  const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl) {
-    console.error('Missing DATABASE_URL');
+
+  // Require at least one write backend
+  if (!isApiMode() && !process.env.DATABASE_URL) {
+    console.error(
+      'Missing write backend: set DATABASE_URL for PostgreSQL mode, ' +
+      'or set MEMORY_DATABASE_API_URL + MEMORY_DATABASE_API_TOKEN for API mode.'
+    );
     process.exit(1);
   }
 
@@ -53,23 +57,19 @@ async function main(): Promise<void> {
   }
 
   if (cli.verbose) {
+    const writeMode = isApiMode() ? 'api (MEMORY_DATABASE_API_URL)' : 'pg (DATABASE_URL)';
     console.log(`[live-sync] Validated session for user: ${user.username}#${user.discriminator}`);
+    console.log(`[live-sync] Write mode: ${writeMode}`);
   }
 
-  const pool = new pg.Pool({ connectionString: databaseUrl });
+  const result = await syncChannel(session, cli.channel, {
+    limit: cli.limit,
+    before: cli.before,
+    after: cli.after,
+    verbose: cli.verbose,
+  });
 
-  try {
-    const result = await syncChannelToDB(pool, session, cli.channel, {
-      limit: cli.limit,
-      before: cli.before,
-      after: cli.after,
-      verbose: cli.verbose,
-    });
-
-    console.log(JSON.stringify(result, null, 2));
-  } finally {
-    await pool.end();
-  }
+  console.log(JSON.stringify(result, null, 2));
 }
 
 main().catch(err => {

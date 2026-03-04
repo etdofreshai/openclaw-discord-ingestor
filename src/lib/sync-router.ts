@@ -1,8 +1,8 @@
 import { Router, Request, Response, NextFunction } from 'express';
-import pg from 'pg';
 import { loadSession } from './session.js';
 import { validateToken } from './token-validator.js';
-import { syncChannelToDB, fetchChannelName } from './live-sync.js';
+import { syncChannel, fetchChannelName } from './live-sync.js';
+import { isApiMode } from './api-writer.js';
 import {
   loadJobs,
   createJob,
@@ -88,9 +88,10 @@ router.post('/api/sync', requireAuth, async (req: Request, res: Response) => {
     return;
   }
 
-  const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl) {
-    res.status(500).json({ error: 'DATABASE_URL is not configured.' });
+  if (!isApiMode() && !process.env.DATABASE_URL) {
+    res.status(500).json({
+      error: 'DATABASE_URL is not configured and API mode (MEMORY_DATABASE_API_URL + MEMORY_DATABASE_API_TOKEN) is not active.',
+    });
     return;
   }
 
@@ -147,9 +148,8 @@ router.post('/api/sync', requireAuth, async (req: Request, res: Response) => {
   const { promise } = enqueue(`manual:${run.runId}`, `manual sync #${channel.trim()}`, async () => {
     await updateRun(run.runId, { status: 'running' });
 
-    const pool = new pg.Pool({ connectionString: databaseUrl });
     try {
-      const result = await syncChannelToDB(pool, session, channel.trim(), {
+      const result = await syncChannel(session, channel.trim(), {
         limit: parsedLimit,
         before: before?.trim() || undefined,
         after: effectiveAfter,
@@ -177,8 +177,6 @@ router.post('/api/sync', requireAuth, async (req: Request, res: Response) => {
       });
       syncError = message;
       throw err; // re-throw so queue logs it
-    } finally {
-      await pool.end();
     }
   });
 

@@ -514,11 +514,68 @@ All runtime data is stored relative to the server's working directory:
 
 ---
 
+## Write Mode Selection
+
+The ingestor supports two write backends. Mode is selected automatically based on environment variables.
+
+### Precedence
+
+| Priority | Condition | Mode |
+|----------|-----------|------|
+| **1 (preferred)** | `MEMORY_DATABASE_API_URL` **and** `MEMORY_DATABASE_API_TOKEN` both set | **API mode** — writes via `POST /api/messages` |
+| **2 (fallback)** | `DATABASE_URL` set (and API vars absent/incomplete) | **PG mode** — direct PostgreSQL upsert |
+
+If neither is configured the server/CLI exits with an error.
+
+### API Mode
+
+When `MEMORY_DATABASE_API_URL` + `MEMORY_DATABASE_API_TOKEN` are present, each normalized Discord message is POSTed to:
+
+```
+POST {MEMORY_DATABASE_API_URL}/api/messages
+Authorization: Bearer {MEMORY_DATABASE_API_TOKEN}
+Content-Type: application/json
+
+{
+  "source": "discord",
+  "sender": "...",
+  "recipient": "discord-channel:<id>",
+  "content": "...",
+  "timestamp": "2024-01-01T00:00:00.000Z",
+  "external_id": "<discord-message-id>",
+  "metadata": { ... }
+}
+```
+
+#### Retry / Backoff
+
+API writes automatically retry on transient failures:
+- **429 Rate-limit** — reads `Retry-After` (or `X-RateLimit-Reset-After`) header; waits + 500 ms safety buffer; up to 3 retries.
+- **5xx Server errors** — exponential backoff starting at 1 s; up to 3 retries.
+- **Network errors** — same exponential backoff; up to 3 retries.
+- **4xx (non-429)** — not retried; message counted as `skipped`.
+
+#### Metric caveats (API mode)
+
+| Metric | Mapping |
+|--------|---------|
+| `fetched` | Total messages fetched from Discord API — always accurate |
+| `inserted` | HTTP 201 (Created) responses — new record written |
+| `updated` | HTTP 200 (OK) or 409 (Conflict) responses — existing record |
+| `skipped` | Unrecoverable errors or exhausted retries |
+| `attachmentsSeen` | Count of Discord attachments across all messages — always accurate |
+
+> ⚠️ If the API always returns `200` for upserts (never `201`), `inserted` will be `0` and all successful writes appear as `updated`. The sum `inserted + updated + skipped` always equals `fetched`.
+
+---
+
 ## Environment Variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `DATABASE_URL` | ✅ | — | PostgreSQL connection string |
+| `MEMORY_DATABASE_API_URL` | ✅ (API mode) | — | Base URL of the Memory Database API (e.g. `http://host:3000`). When set together with `MEMORY_DATABASE_API_TOKEN`, API mode is activated and `DATABASE_URL` is not needed. |
+| `MEMORY_DATABASE_API_TOKEN` | ✅ (API mode) | — | Bearer token for the Memory Database API. Sent as `Authorization: Bearer <token>`. |
+| `DATABASE_URL` | ✅ (PG mode) | — | PostgreSQL connection string. Required when API mode is not active. |
 | `UI_TOKEN` | optional | — | If set, all `/api/*` routes require `Bearer` token auth. If unset, auth is disabled and no auth UI is shown. |
 | `LOGIN_SERVER_PORT` | optional | `3456` | HTTP server port |
 | `CDP_PORT` | optional | `9222` | Chromium remote debugging port |
@@ -526,6 +583,23 @@ All runtime data is stored relative to the server's working directory:
 | `SCHEDULE_SINCE_OVERLAP_PERCENT` | optional | `10` | Extra lookback applied to scheduled `since` runs to avoid edge misses (e.g. `1h` + 10% => 66m). |
 | `SCHEDULER_CONCURRENCY` | optional | `1` | Max concurrent jobs the scheduler queue runs simultaneously. Increase with caution — higher values may trigger Discord 429 rate-limits. |
 | `SCHEDULER_JOB_SPACING_MS` | optional | `1000` | Minimum delay (ms) between jobs after one finishes and before the next starts. Acts as a rate-limit buffer between sequential job runs. |
+
+### Example: API mode `.env`
+
+```env
+MEMORY_DATABASE_API_URL=http://dokploy-memory-database-api-lxfp0i:3000
+MEMORY_DATABASE_API_TOKEN=your-read-write-api-token
+UI_TOKEN=your-ui-token-here
+LOGIN_SERVER_PORT=3456
+```
+
+### Example: PG mode `.env` (legacy)
+
+```env
+DATABASE_URL=postgresql://postgres:password@host:5432/postgres
+UI_TOKEN=your-ui-token-here
+LOGIN_SERVER_PORT=3456
+```
 
 ---
 

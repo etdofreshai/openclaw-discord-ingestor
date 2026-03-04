@@ -1,9 +1,9 @@
-import pg from 'pg';
 import { loadJobs, updateJob, type Job } from './job-store.js';
 import { createRun, updateRun } from './run-store.js';
 import { loadSession } from './session.js';
 import { validateToken } from './token-validator.js';
-import { syncChannelToDB, fetchChannelName } from './live-sync.js';
+import { syncChannel, fetchChannelName } from './live-sync.js';
+import { isApiMode } from './api-writer.js';
 import { computeNextBoundary, sincePresetToMs, timestampToSnowflake } from './since-presets.js';
 import { enqueue } from './scheduler-queue.js';
 
@@ -32,9 +32,11 @@ export type JobRunOverrides = {
  * runningJobs Set.
  */
 async function executeJob(job: Job, overrides?: JobRunOverrides): Promise<void> {
-  const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl) {
-    console.error('[Scheduler] DATABASE_URL not configured — cannot run job.');
+  if (!isApiMode() && !process.env.DATABASE_URL) {
+    console.error(
+      '[Scheduler] DATABASE_URL not configured and API mode ' +
+      '(MEMORY_DATABASE_API_URL + MEMORY_DATABASE_API_TOKEN) is not active — cannot run job.'
+    );
     return;
   }
 
@@ -98,16 +100,17 @@ async function executeJob(job: Job, overrides?: JobRunOverrides): Promise<void> 
     attachmentsSeen: 0,
   });
 
-  const pool = new pg.Pool({ connectionString: databaseUrl });
+  const writeMode = isApiMode() ? 'api' : 'pg';
 
   try {
     console.log(
       `[Scheduler] Starting job ${job.id} (${job.name}) — channel ${job.channel}` +
       (job.cadencePreset ? ` — cadence=${job.cadencePreset}` : '') +
-      (runSincePreset ? ` — since=${runSincePreset} (after=${effectiveAfter})` : '')
+      (runSincePreset ? ` — since=${runSincePreset} (after=${effectiveAfter})` : '') +
+      ` [write=${writeMode}]`
     );
 
-    const result = await syncChannelToDB(pool, session, job.channel, {
+    const result = await syncChannel(session, job.channel, {
       limit: runLimit,
       before: runBefore,
       after: effectiveAfter,
@@ -139,8 +142,6 @@ async function executeJob(job: Job, overrides?: JobRunOverrides): Promise<void> 
       status: 'error',
       error: message,
     });
-  } finally {
-    await pool.end();
   }
 }
 

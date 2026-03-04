@@ -1,5 +1,6 @@
 import pg from 'pg';
 import type { DiscordSession } from './session.js';
+import { isApiMode, writeMessagesViaApi, type ApiMessagePayload } from './api-writer.js';
 
 type DiscordAPIMessage = {
   id: string;
@@ -17,7 +18,8 @@ type DiscordAPIMessage = {
   mentions?: unknown[];
 };
 
-type Normalized = {
+/** Normalized Discord message ready to be written to any backend. */
+export type Normalized = {
   externalId: string;
   timestamp: Date;
   sender: string;
@@ -179,12 +181,15 @@ async function ensureSourceId(pool: pg.Pool): Promise<number> {
   return inserted.rows[0].id;
 }
 
-export async function syncChannelToDB(
-  pool: pg.Pool,
+/**
+ * Fetch and normalize messages from a Discord channel.
+ * Pure fetch/normalize — no side effects on any backend.
+ */
+async function fetchAndNormalize(
   session: DiscordSession,
   channelId: string,
-  options?: { limit?: number; before?: string; after?: string; verbose?: boolean }
-): Promise<SyncResult> {
+  options?: { limit?: number; before?: string; after?: string }
+): Promise<Normalized[]> {
   const requested = Math.max(1, options?.limit || 100);
 
   const messages: DiscordAPIMessage[] = [];
@@ -234,8 +239,16 @@ export async function syncChannelToDB(
     if (page.length < Math.min(remaining, 100)) break;
   }
 
-  const normalized = messages.map(normalize);
+  return messages.map(normalize);
+}
 
+/**
+ * Write normalized messages to PostgreSQL via direct upsert.
+ */
+async function writeToPostgres(
+  pool: pg.Pool,
+  normalized: Normalized[]
+): Promise<{ inserted: number; updated: number; skipped: number; attachmentsSeen: number }> {
   const sourceId = await ensureSourceId(pool);
   let inserted = 0;
   let updated = 0;
@@ -279,17 +292,94 @@ export async function syncChannelToDB(
     }
   }
 
-  const result: SyncResult = {
-    fetched: messages.length,
-    inserted,
-    updated,
-    skipped,
-    attachmentsSeen,
-  };
+  return { inserted, updated, skipped, attachmentsSeen };
+}
+
+/**
+ * Unified channel sync: fetch from Discord and write to the configured backend.
+ *
+ * Write mode is selected automatically based on environment variables:
+ *   - API mode  (preferred): MEMORY_DATABASE_API_URL + MEMORY_DATABASE_API_TOKEN
+ *   - PG mode   (fallback) : DATABASE_URL
+ *
+ * In PG mode a short-lived `pg.Pool` is created and destroyed per call.
+ * In API mode no database connection is needed.
+ */
+export async function syncChannel(
+  session: DiscordSession,
+  channelId: string,
+  options?: { limit?: number; before?: string; after?: string; verbose?: boolean }
+): Promise<SyncResult> {
+  const normalized = await fetchAndNormalize(session, channelId, options);
+
+  let result: SyncResult;
+
+  if (isApiMode()) {
+    // ── API write mode ───────────────────────────────────────────────────────
+    const inputs = normalized.map(msg => ({
+      payload: {
+        source: 'discord' as const,
+        sender: msg.sender,
+        recipient: msg.recipient,
+        content: msg.content,
+        timestamp: msg.timestamp.toISOString(),
+        external_id: msg.externalId,
+        metadata: msg.metadata,
+      } satisfies ApiMessagePayload,
+      attachmentCount: msg.attachmentCount,
+    }));
+
+    const writeResult = await writeMessagesViaApi(inputs);
+    result = { fetched: normalized.length, ...writeResult };
+  } else {
+    // ── PostgreSQL write mode ────────────────────────────────────────────────
+    const databaseUrl = process.env.DATABASE_URL;
+    if (!databaseUrl) {
+      throw new Error(
+        'DATABASE_URL is not configured and API mode (MEMORY_DATABASE_API_URL + MEMORY_DATABASE_API_TOKEN) is not active.'
+      );
+    }
+
+    const pool = new pg.Pool({ connectionString: databaseUrl });
+    try {
+      const writeResult = await writeToPostgres(pool, normalized);
+      result = { fetched: normalized.length, ...writeResult };
+    } finally {
+      await pool.end();
+    }
+  }
+
+  if (options?.verbose) {
+    const mode = isApiMode() ? 'api' : 'pg';
+    console.log(
+      `[live-sync] Channel ${channelId} [${mode}]: fetched ${result.fetched}, ` +
+      `inserted ${result.inserted}, updated ${result.updated}, ` +
+      `skipped ${result.skipped}, attachmentsSeen ${result.attachmentsSeen}`
+    );
+  }
+
+  return result;
+}
+
+/**
+ * PG-only channel sync (legacy — requires an explicit pg.Pool).
+ * Prefer `syncChannel()` for new code; it selects the write backend automatically.
+ */
+export async function syncChannelToDB(
+  pool: pg.Pool,
+  session: DiscordSession,
+  channelId: string,
+  options?: { limit?: number; before?: string; after?: string; verbose?: boolean }
+): Promise<SyncResult> {
+  const normalized = await fetchAndNormalize(session, channelId, options);
+  const writeResult = await writeToPostgres(pool, normalized);
+  const result: SyncResult = { fetched: normalized.length, ...writeResult };
 
   if (options?.verbose) {
     console.log(
-      `[live-sync] Channel ${channelId}: fetched ${result.fetched}, inserted ${result.inserted}, updated ${result.updated}, skipped ${result.skipped}, attachmentsSeen ${result.attachmentsSeen}`
+      `[live-sync] Channel ${channelId} [pg]: fetched ${result.fetched}, ` +
+      `inserted ${result.inserted}, updated ${result.updated}, ` +
+      `skipped ${result.skipped}, attachmentsSeen ${result.attachmentsSeen}`
     );
   }
 

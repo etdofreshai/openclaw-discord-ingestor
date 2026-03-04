@@ -2,6 +2,7 @@ import 'dotenv/config';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import pg from 'pg';
+import { isApiMode, writeMessagesViaApi, type ApiMessagePayload } from './lib/api-writer.js';
 
 type Cli = {
   input: string;
@@ -130,8 +131,11 @@ async function ensureSourceId(pool: pg.Pool): Promise<number> {
 async function main(): Promise<void> {
   const cli = parseArgs(process.argv);
   const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl && !cli.dryRun) {
-    console.error('Missing DATABASE_URL');
+  if (!cli.dryRun && !isApiMode() && !databaseUrl) {
+    console.error(
+      'Missing write backend: set DATABASE_URL for PostgreSQL mode, ' +
+      'or set MEMORY_DATABASE_API_URL + MEMORY_DATABASE_API_TOKEN for API mode.'
+    );
     process.exit(1);
   }
 
@@ -180,31 +184,70 @@ async function main(): Promise<void> {
     return;
   }
 
-  const pool = new pg.Pool({ connectionString: databaseUrl });
+  if (isApiMode()) {
+    // ── API write mode ─────────────────────────────────────────────────────
+    const inputs = normalized.map(msg => ({
+      payload: {
+        source: 'discord' as const,
+        sender: msg.sender,
+        recipient: msg.recipient,
+        content: msg.content,
+        timestamp: msg.timestamp.toISOString(),
+        external_id: msg.externalId,
+        metadata: msg.metadata,
+      } satisfies ApiMessagePayload,
+      attachmentCount: 0, // JSON imports don't track attachment counts separately
+    }));
 
-  try {
-    const sourceId = await ensureSourceId(pool);
-    let upserted = 0;
+    const writeResult = await writeMessagesViaApi(inputs);
+    console.log(JSON.stringify({
+      filesScanned: files.length,
+      filesParsed,
+      messagesSeen,
+      messagesNormalized,
+      normalizeSkipped: skipped,
+      ...writeResult,
+      writeMode: 'api',
+      dryRun: false,
+    }, null, 2));
+  } else {
+    // ── PostgreSQL write mode ──────────────────────────────────────────────
+    const pool = new pg.Pool({ connectionString: databaseUrl! });
 
-    for (const msg of normalized) {
-      const res = await pool.query(
-        `INSERT INTO messages (source_id, external_id, timestamp, sender, recipient, content, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (source_id, external_id)
-         DO UPDATE SET
-           timestamp = EXCLUDED.timestamp,
-           sender = EXCLUDED.sender,
-           recipient = EXCLUDED.recipient,
-           content = EXCLUDED.content,
-           metadata = EXCLUDED.metadata`,
-        [sourceId, msg.externalId, msg.timestamp.toISOString(), msg.sender, msg.recipient, msg.content, JSON.stringify(msg.metadata)]
-      );
-      if ((res.rowCount ?? 0) > 0) upserted++;
+    try {
+      const sourceId = await ensureSourceId(pool);
+      let upserted = 0;
+
+      for (const msg of normalized) {
+        const res = await pool.query(
+          `INSERT INTO messages (source_id, external_id, timestamp, sender, recipient, content, metadata)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           ON CONFLICT (source_id, external_id)
+           DO UPDATE SET
+             timestamp = EXCLUDED.timestamp,
+             sender = EXCLUDED.sender,
+             recipient = EXCLUDED.recipient,
+             content = EXCLUDED.content,
+             metadata = EXCLUDED.metadata`,
+          [sourceId, msg.externalId, msg.timestamp.toISOString(), msg.sender, msg.recipient, msg.content, JSON.stringify(msg.metadata)]
+        );
+        if ((res.rowCount ?? 0) > 0) upserted++;
+      }
+
+      console.log(JSON.stringify({
+        filesScanned: files.length,
+        filesParsed,
+        messagesSeen,
+        messagesNormalized,
+        normalizeSkipped: skipped,
+        upserted,
+        sourceId,
+        writeMode: 'pg',
+        dryRun: false,
+      }, null, 2));
+    } finally {
+      await pool.end();
     }
-
-    console.log(JSON.stringify({ filesScanned: files.length, filesParsed, messagesSeen, messagesNormalized, skipped, upserted, sourceId, dryRun: false }, null, 2));
-  } finally {
-    await pool.end();
   }
 }
 
