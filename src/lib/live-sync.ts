@@ -24,7 +24,16 @@ type Normalized = {
   recipient: string;
   content: string;
   metadata: Record<string, unknown>;
+  attachmentCount: number;
 };
+
+export interface SyncResult {
+  fetched: number;
+  inserted: number;
+  updated: number;
+  skipped: number;
+  attachmentsSeen: number;
+}
 
 export async function fetchChannelMessages(
   session: DiscordSession,
@@ -58,7 +67,8 @@ function normalize(msg: DiscordAPIMessage): Normalized {
     'unknown';
 
   const recipient = `discord-channel:${msg.channel_id}`;
-  const hasRich = (msg.attachments?.length ?? 0) > 0 || (msg.embeds?.length ?? 0) > 0;
+  const attachmentCount = Array.isArray(msg.attachments) ? msg.attachments.length : 0;
+  const hasRich = attachmentCount > 0 || (msg.embeds?.length ?? 0) > 0;
   const content = msg.content?.trim() || (hasRich ? '[non-text discord message]' : '');
 
   return {
@@ -67,6 +77,7 @@ function normalize(msg: DiscordAPIMessage): Normalized {
     sender,
     recipient,
     content,
+    attachmentCount,
     metadata: {
       channelId: msg.channel_id,
       author: msg.author,
@@ -96,15 +107,20 @@ export async function syncChannelToDB(
   session: DiscordSession,
   channelId: string,
   options?: { limit?: number; before?: string; after?: string; verbose?: boolean }
-): Promise<{ fetched: number; upserted: number }> {
+): Promise<SyncResult> {
   const messages = await fetchChannelMessages(session, channelId, options);
   const normalized = messages.map(normalize);
 
   const sourceId = await ensureSourceId(pool);
-  let upserted = 0;
+  let inserted = 0;
+  let updated = 0;
+  let skipped = 0;
+  let attachmentsSeen = 0;
 
   for (const msg of normalized) {
-    const res = await pool.query(
+    attachmentsSeen += msg.attachmentCount;
+
+    const res = await pool.query<{ xmax: string }>(
       `INSERT INTO messages (source_id, external_id, timestamp, sender, recipient, content, metadata)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (source_id, external_id)
@@ -113,7 +129,8 @@ export async function syncChannelToDB(
          sender = EXCLUDED.sender,
          recipient = EXCLUDED.recipient,
          content = EXCLUDED.content,
-         metadata = EXCLUDED.metadata`,
+         metadata = EXCLUDED.metadata
+       RETURNING xmax`,
       [
         sourceId,
         msg.externalId,
@@ -124,14 +141,32 @@ export async function syncChannelToDB(
         JSON.stringify(msg.metadata),
       ]
     );
-    if ((res.rowCount ?? 0) > 0) upserted++;
+
+    if ((res.rowCount ?? 0) > 0) {
+      // xmax = '0' means a fresh insert; non-zero means an update
+      if (res.rows[0].xmax === '0') {
+        inserted++;
+      } else {
+        updated++;
+      }
+    } else {
+      skipped++;
+    }
   }
+
+  const result: SyncResult = {
+    fetched: messages.length,
+    inserted,
+    updated,
+    skipped,
+    attachmentsSeen,
+  };
 
   if (options?.verbose) {
     console.log(
-      `[live-sync] Channel ${channelId}: fetched ${messages.length}, upserted ${upserted}`
+      `[live-sync] Channel ${channelId}: fetched ${result.fetched}, inserted ${result.inserted}, updated ${result.updated}, skipped ${result.skipped}, attachmentsSeen ${result.attachmentsSeen}`
     );
   }
 
-  return { fetched: messages.length, upserted };
+  return result;
 }

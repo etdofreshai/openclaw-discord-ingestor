@@ -2,24 +2,37 @@
 
 Standalone Discord → OpenClaw memory DB ingestor.
 
-This imports Discord messages into the existing OpenClaw PostgreSQL `messages` table, using either **JSON export files** or **live API sync** with a captured user session.
+Imports Discord messages into the existing OpenClaw PostgreSQL `messages` table using either **JSON export files** or **live API sync** with a captured user session. Includes a full-featured web UI with scheduled jobs, run logs, and optional token authentication.
+
+---
 
 ## Features
 
-### JSON Import (existing)
+### JSON Import
 - Recursive JSON discovery under an input directory
-- Detects JSON files that contain a `messages` array
-- Normalizes Discord messages to OpenClaw `messages` schema
+- Detects files containing a `messages` array
+- Normalizes Discord messages to the OpenClaw `messages` schema
 - Idempotent upsert via `(source_id, external_id)`
 - Auto-creates `discord` source in `sources` table if missing
 - Dry-run mode for safe validation
 
-### Live Sync (new)
+### Live Sync
 - Browser-driven login capture via Chromium
 - Token persisted locally (`.chrome-profile/discord-session.json`)
 - Token validation against Discord API `/users/@me`
-- Pull messages from specified channel ID
+- Pull messages from any channel ID
 - Idempotent upsert into messages table
+
+### Web UI (v0.2)
+- **Sync form** with Manual Run or Scheduled Job mode
+- **Auth modal** — shown only when `UI_TOKEN` is set; saves token to `localStorage`
+- **Scheduled jobs** — persisted to `.data/jobs/jobs.json`, auto-scheduled on server start
+- **Run logs** — every sync recorded with metrics in `.data/runs/runs.json`
+- **Jobs table** — list, run, enable/disable, and delete scheduled jobs
+- **Runs table** — last 50 runs with counts (fetched, inserted, updated, skipped, attachments)
+- **Auto-refresh** every 30 seconds
+
+---
 
 ## Install
 
@@ -35,183 +48,300 @@ Create `.env`:
 DATABASE_URL=postgresql://postgres:password@host:5432/postgres
 LOGIN_SERVER_PORT=3456
 CDP_PORT=9222
-# Optional: if set, /sync and /api/sync require Bearer token auth
+# Optional: if set, API endpoints require Bearer token auth. Leave unset to disable auth.
 UI_TOKEN=your-secret-token-here
 ```
+
+---
 
 ## Usage
 
 ### 0. Web UI — Sync Interface
 
-After starting the server, a protected web interface is available at:
+Start the server, then open:
 
 ```
 http://localhost:3456/sync
 ```
 
-It lets you trigger live syncs without the CLI by filling in:
+#### Auth behavior
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| Channel ID | ✅ | Numeric Discord channel ID (right-click channel → Copy Channel ID) |
-| Limit | optional | Max messages to fetch (1–100, default 100) |
-| After | optional | Fetch messages after this message ID (for incremental syncs) |
-| Before | optional | Fetch messages before this message ID (for paginating backwards) |
+| `UI_TOKEN` set? | Behavior |
+|----------------|----------|
+| **No** | No auth UI — page and all API routes are open |
+| **Yes** | Auth modal appears on first visit; token saved to `localStorage`; Clear Token button visible; all API calls use the saved token automatically |
 
-**Auth:** If `UI_TOKEN` is set, `/sync` and `/api/sync` require it. If `UI_TOKEN` is unset, auth is disabled.
-The page stores your token in browser `localStorage` so you only have to enter it once when auth is enabled.
+> The modal validates the token against the server before saving it. Once saved, it persists in the browser until you clear it.
 
-To access the page via a query param (e.g. in a bookmarked URL):
+#### Manual Run
 
-```
-http://localhost:3456/sync?token=your-secret-token-here
-```
+1. Select **"Manual Run"** in the mode dropdown (default)
+2. Fill in Channel ID and optional Limit / After / Before
+3. Click **▶ Run Sync**
+4. Result appears immediately below the form; run is logged to the Runs table
 
-To trigger a sync programmatically:
+#### Scheduled Job
+
+1. Select **"Scheduled Job"** in the mode dropdown
+2. Fill in **Job Name** (required), **Channel ID** (required), optional params, and **Interval (minutes)** (default: 60)
+3. Click **📅 Create Scheduled Job**
+4. Job appears in the Scheduled Jobs table; it runs automatically at the configured interval
+5. Jobs survive server restarts — timers are rehydrated from `.data/jobs/jobs.json`
+
+#### Scheduled Jobs table
+
+| Column | Description |
+|--------|-------------|
+| Name | Human-readable job name |
+| Channel | Discord channel ID |
+| Every | Interval in minutes |
+| Status | enabled / disabled |
+| Last Run | Relative time of last execution |
+| Last Result | success / error / never |
+| Actions | ▶ Run now · Enable/Disable · ✕ Delete |
+
+#### Recent Runs table
+
+| Column | Description |
+|--------|-------------|
+| Started | When the run began |
+| Source | manual or scheduled (with job ID) |
+| Channel | Channel ID synced |
+| Status | success / error / running |
+| Fetched | Messages retrieved from Discord API |
+| Inserted | New rows written to DB |
+| Updated | Existing rows updated |
+| Skipped | Rows with no change (upsert no-op) |
+| Attachments | Total attachments seen across fetched messages |
+| Duration | Elapsed seconds |
+| Error | Error message (truncated) if failed |
+
+---
+
+## API Reference
+
+All endpoints require `Authorization: Bearer <UI_TOKEN>` when `UI_TOKEN` is configured.
+When `UI_TOKEN` is unset, all routes are open.
+
+### `POST /api/sync`
+
+Trigger a manual sync immediately.
 
 ```bash
 curl -X POST http://localhost:3456/api/sync \
-  -H "Authorization: Bearer your-secret-token-here" \
+  -H "Authorization: Bearer your-token" \
   -H "Content-Type: application/json" \
   -d '{"channel":"123456789012345678","limit":50}'
-
-# With after/before filters
-curl -X POST http://localhost:3456/api/sync \
-  -H "Authorization: Bearer your-secret-token-here" \
-  -H "Content-Type: application/json" \
-  -d '{"channel":"123456789012345678","after":"987654321098765432"}'
 ```
 
-Returns JSON:
+Body params:
 
+| Param | Required | Description |
+|-------|----------|-------------|
+| `channel` | ✅ | Discord channel ID |
+| `limit` | optional | Max messages to fetch (1–100, default 100) |
+| `after` | optional | Fetch messages after this message ID |
+| `before` | optional | Fetch messages before this message ID |
+
+Response:
 ```json
 {
   "success": true,
+  "runId": "uuid",
   "channel": "123456789012345678",
   "user": "username#0",
   "fetched": 47,
-  "upserted": 47
+  "inserted": 45,
+  "updated": 2,
+  "skipped": 0,
+  "attachmentsSeen": 3
 }
 ```
 
-### 1. JSON Import
+### `GET /api/jobs`
 
-Import from Discord export JSON files:
-
-```bash
-npm run import -- --input /path/to/discord-export
-```
-
-Options:
-
-- `--dry-run` : parse/normalize only, no DB writes
-- `--verbose` : print per-file stats and warnings
-
-### 2. Live Sync
-
-#### Step 1: Start the Login Server
+List all scheduled jobs.
 
 ```bash
-npm run server
+curl http://localhost:3456/api/jobs -H "Authorization: Bearer your-token"
 ```
 
-This starts an Express server with WebSocket support at `http://localhost:3456` (or port specified by `LOGIN_SERVER_PORT`).
+### `POST /api/jobs`
 
-#### Step 2: Log in via Browser UI
-
-1. Open `http://localhost:3456/discord-login` in your browser
-2. Click "Start Login" to launch a Chromium instance
-3. Log in to your Discord account in the remote browser
-4. The server will automatically capture your token and save it locally
-5. You'll see a success message when complete
-
-#### Step 3: Sync Messages
+Create a scheduled job.
 
 ```bash
-npm run sync -- --channel <channel-id> [--limit 100] [--verbose]
+curl -X POST http://localhost:3456/api/jobs \
+  -H "Authorization: Bearer your-token" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"General Hourly","channel":"123456789012345678","intervalMinutes":60,"enabled":true}'
 ```
 
-Options:
+Body params:
 
-- `--channel` : Discord channel ID to sync (required)
-- `--limit` : Max messages to fetch (default: 100, max: 100)
-- `--before` : Message ID to sync messages before
-- `--after` : Message ID to sync messages after
-- `--verbose` : Print detailed progress
+| Param | Required | Description |
+|-------|----------|-------------|
+| `name` | ✅ | Human-readable job name |
+| `channel` | ✅ | Discord channel ID |
+| `intervalMinutes` | optional | Run interval (default 60, min 1) |
+| `limit` | optional | Max messages per run |
+| `after` | optional | Fixed after filter |
+| `before` | optional | Fixed before filter |
+| `enabled` | optional | Start enabled (default true) |
 
-Examples:
+### `POST /api/jobs/:id/run`
+
+Trigger a scheduled job immediately (async, fire-and-forget). Check `/api/runs` for the result.
 
 ```bash
-# Sync latest 50 messages from a channel
-npm run sync -- --channel 123456789012345678 --limit 50 --verbose
-
-# Sync all messages after a specific message
-npm run sync -- --channel 123456789012345678 --after 987654321098765432
-
-# Sync messages between two points (requires multiple calls)
-npm run sync -- --channel 123456789012345678 --before 987654321098765432 --limit 100
+curl -X POST http://localhost:3456/api/jobs/<id>/run \
+  -H "Authorization: Bearer your-token"
 ```
+
+### `PATCH /api/jobs/:id`
+
+Update job fields (including enable/disable).
+
+```bash
+# Disable a job
+curl -X PATCH http://localhost:3456/api/jobs/<id> \
+  -H "Authorization: Bearer your-token" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled":false}'
+
+# Change interval
+curl -X PATCH http://localhost:3456/api/jobs/<id> \
+  -H "Authorization: Bearer your-token" \
+  -H "Content-Type: application/json" \
+  -d '{"intervalMinutes":30}'
+```
+
+### `DELETE /api/jobs/:id`
+
+Delete a scheduled job and cancel its timer.
+
+```bash
+curl -X DELETE http://localhost:3456/api/jobs/<id> \
+  -H "Authorization: Bearer your-token"
+```
+
+### `GET /api/runs`
+
+Get recent run logs (newest first). Optional `?limit=N` (max 200, default 50).
+
+```bash
+curl http://localhost:3456/api/runs?limit=20 -H "Authorization: Bearer your-token"
+```
+
+---
+
+## Storage Paths
+
+All runtime data is stored relative to the server's working directory (the project root when using `npm run server`):
+
+| Path | Contents |
+|------|----------|
+| `.data/jobs/jobs.json` | All scheduled jobs (JSON array) |
+| `.data/runs/runs.json` | Run log history (JSON array, capped at 200 entries) |
+| `.chrome-profile/discord-session.json` | Captured Discord session token |
+
+Both `.data/` and `.chrome-profile/` are listed in `.gitignore`.
+
+---
 
 ## Environment Variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `DATABASE_URL` | ✅ | — | PostgreSQL connection string |
-| `UI_TOKEN` | optional | — | If set, required to access `/sync` and `POST /api/sync` (Bearer token). If unset, UI/API are open. |
-| `LOGIN_SERVER_PORT` | optional | `3456` | Port for the Express server |
+| `UI_TOKEN` | optional | — | If set, all `/api/*` routes require `Bearer` token auth. If unset, auth is disabled and no auth UI is shown. |
+| `LOGIN_SERVER_PORT` | optional | `3456` | HTTP server port |
 | `CDP_PORT` | optional | `9222` | Chromium remote debugging port |
 | `PUPPETEER_EXECUTABLE_PATH` | optional | `/usr/bin/chromium` | Path to Chromium binary |
+
+---
+
+## CLI Usage
+
+### 1. JSON Import
+
+```bash
+npm run import -- --input /path/to/discord-export
+# Options: --dry-run, --verbose
+```
+
+### 2. Live Sync CLI
+
+```bash
+# Step 1: Start the server
+npm run server
+
+# Step 2: Log in via browser at http://localhost:3456/discord-login
+
+# Step 3: Sync from CLI
+npm run sync -- --channel 123456789012345678 --limit 50 --verbose
+npm run sync -- --channel 123456789012345678 --after 987654321098765432
+```
+
+Options for `npm run sync`:
+
+| Flag | Description |
+|------|-------------|
+| `--channel` | Discord channel ID (required) |
+| `--limit N` | Max messages to fetch |
+| `--before <id>` | Fetch messages before this ID |
+| `--after <id>` | Fetch messages after this ID |
+| `--verbose` | Print progress |
+
+---
 
 ## Architecture
 
 ```
 src/
-├── index.ts              # JSON import CLI
-├── server.ts             # Express server entry point (login + sync)
+├── index.ts                  # JSON import CLI
+├── server.ts                 # Express server entry point
 ├── commands/
-│   └── live-sync.ts      # Live sync CLI
+│   └── live-sync.ts          # Live sync CLI command
 └── lib/
-    ├── browser.ts        # Chromium CDP helpers
-    ├── session.ts        # Session persistence
-    ├── token-validator.ts # Discord API validation
-    ├── login-server.ts   # Express + WebSocket login UI
-    ├── live-sync.ts      # Discord API message sync
-    └── sync-router.ts    # Authenticated sync web UI + /api/sync endpoint
+    ├── browser.ts            # Chromium CDP helpers
+    ├── session.ts            # Discord session persistence (.chrome-profile/)
+    ├── token-validator.ts    # Discord API token validation
+    ├── login-server.ts       # Login UI + WebSocket screencast + CDP token capture
+    ├── live-sync.ts          # Discord API fetch + DB upsert (returns SyncResult)
+    ├── job-store.ts          # Job CRUD + .data/jobs/jobs.json persistence
+    ├── run-store.ts          # Run log append/query + .data/runs/runs.json persistence
+    ├── scheduler.ts          # In-process interval scheduler (rehydrates on start)
+    └── sync-router.ts        # All /sync and /api/* routes + full-page HTML UI
 ```
 
-## ⚠️ Security Notice
+---
 
-**User tokens are sensitive.** Your Discord user token provides full access to your account.
+## Scheduler Details
 
-- Never share your token with anyone
-- The token is stored locally in `.chrome-profile/discord-session.json`
-- This file should be in `.gitignore`
-- If you suspect your token has been compromised, change your Discord password immediately (this invalidates all tokens)
+- Jobs are loaded from `.data/jobs/jobs.json` on server startup
+- Each enabled job gets a `setTimeout` timer calculating the delay from `lastRunAt + intervalMinutes`
+- If a job has never run, it starts after a 5-second delay (to let the server finish starting up)
+- Overlapping runs of the same job are prevented via an in-memory `Set`
+- Editing a job via `PATCH /api/jobs/:id` reschedules its timer automatically
+- Disabling a job cancels its timer immediately
+- `POST /api/jobs/:id/run` fires the job immediately and reschedules from that point
 
-## Notes
-
-- JSON import targets common Discord JSON export structure
-- Live sync uses Discord API v10
-- Messages are deduplicated on `(source_id, external_id)` to prevent duplicates
-- Files that are valid JSON but not message exports are skipped
-- If a message has no text but has attachments/embeds, content is set to `[non-text discord message]`
+---
 
 ## TypeScript
-
-All code is written in TypeScript. To type-check:
 
 ```bash
 npm run typecheck
 ```
 
-## Development
+---
 
-The login server uses:
-- Express for HTTP routes
-- ws for WebSocket communication
-- Chromium CDP for browser automation
-- Runtime.evaluate to extract token from localStorage
+## ⚠️ Security Notice
 
-The sync command uses:
-- Native fetch for Discord API calls
-- pg for PostgreSQL upserts
+**Discord user tokens are sensitive.** They provide full access to your account.
+
+- Never share your token
+- Session stored locally at `.chrome-profile/discord-session.json` (gitignored)
+- `UI_TOKEN` protects the sync API; use a strong random string
+- If your token is compromised, change your Discord password immediately

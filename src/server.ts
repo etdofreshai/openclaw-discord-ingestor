@@ -3,32 +3,35 @@ import http from 'http';
 import express from 'express';
 import loginRouter, { handleDiscordLoginWs } from './lib/login-server.js';
 import syncRouter from './lib/sync-router.js';
+import { startScheduler } from './lib/scheduler.js';
 
 const app = express();
 const server = http.createServer(app);
 
 const PORT = parseInt(process.env.LOGIN_SERVER_PORT || '3456', 10);
 
-// Parse JSON request bodies (required for /api/sync)
+// Parse JSON request bodies (required for /api/sync, /api/jobs, etc.)
 app.use(express.json());
 
 // Login server routes
 app.use(loginRouter);
 
-// Sync UI + API routes (protected by UI_TOKEN)
+// Sync UI + API routes
 app.use(syncRouter);
 
 // Health check
 app.get('/', (_req, res) => {
   res.json({
     name: 'openclaw-discord-ingestor',
-    version: '0.1.0',
+    version: '0.2.0',
     endpoints: {
       login: '/discord-login',
       status: '/discord-login/status',
       validate: '/discord-login/validate',
       syncUi: '/sync',
       syncApi: '/api/sync',
+      jobs: '/api/jobs',
+      runs: '/api/runs',
     },
   });
 });
@@ -44,8 +47,11 @@ server.on('upgrade', (req, socket, head) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`[Discord Login Server] Running on http://localhost:${PORT}`);
-  console.log(`[Discord Login Server] Login UI: http://localhost:${PORT}/discord-login`);
-  console.log(`[Discord Login Server] Sync UI:  http://localhost:${PORT}/sync`);
+server.listen(PORT, async () => {
+  console.log(`[Discord Ingestor] Running on http://localhost:${PORT}`);
+  console.log(`[Discord Ingestor] Login UI: http://localhost:${PORT}/discord-login`);
+  console.log(`[Discord Ingestor] Sync UI:  http://localhost:${PORT}/sync`);
+
+  // Start the job scheduler after server is listening
+  await startScheduler();
 });
