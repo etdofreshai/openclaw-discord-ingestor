@@ -23,14 +23,18 @@ Imports Discord messages into the existing OpenClaw PostgreSQL `messages` table 
 - Pull messages from any channel ID
 - Idempotent upsert into messages table
 
-### Web UI (v0.3)
+### Web UI (v0.4)
 - **Sync form** with Manual Run or Scheduled Job mode
 - **Auth modal** — shown only when `UI_TOKEN` is set; saves token to `localStorage`
 - **Scheduled jobs** — persisted to `.data/jobs/jobs.json`, auto-scheduled on server start
-- **Cadence presets** — dropdown of standard intervals (1m → 1y); boundary-aligned UTC scheduling
-- **Auto-name** — blank job name auto-generates from channel + cadence (e.g. `#general every 1 hour`)
+- **Cadence presets** — compact-label dropdown (1M → 1Y); boundary-aligned UTC scheduling
+- **Since presets** — compact-label dropdown (1M → ALL); unified format with cadence
+- **Compact labels** — both cadence and since dropdowns use short labels: 1M, 5M, 15M, 30M, 1H, 2H, 4H, 6H, 12H, 1D, 3D, 1W, 2W, 1MO, 2MO, 3MO, 4MO, 6MO, 1Y, 3Y, 5Y, 10Y, 20Y, ALL
+- **Auto-name** — blank job name auto-generates from channel + cadence (e.g. `#general every 1H`)
 - **Run logs** — every sync recorded with metrics in `.data/runs/runs.json`
-- **Jobs table** — list, run, enable/disable, and delete scheduled jobs
+- **Jobs table** — list, run, **edit**, enable/disable, and delete scheduled jobs
+- **Edit modal** — per-row ✏ Edit button opens a modal to update name, channel, cadence, since, and enabled state
+- **Link cadence + since** — checkbox in the edit modal keeps Since in sync with Cadence (default ON when they match)
 - **Runs table** — last 50 runs with counts (fetched, inserted, updated, skipped, attachments)
 - **Auto-refresh** every 30 seconds
 
@@ -86,13 +90,31 @@ http://localhost:3456/sync
 
 1. Select **"Scheduled Job"** in the mode dropdown
 2. Fill in **Channel ID** (required) and select a **Cadence** (required)
-3. Optionally enter a **Job Name** — if left blank, one is auto-generated as `#<channelName> every <cadence>` (e.g., `#general every 1 hour`)
+3. Optionally enter a **Job Name** — if left blank, one is auto-generated as `#<channelName> every <cadence>` (e.g., `#general every 1H`)
 4. Optionally select a **Since** lookback window — if left blank, defaults to the same value as cadence
 5. Click **📅 Create Scheduled Job**
 6. Job appears in the Scheduled Jobs table; it fires automatically at the next UTC boundary for the cadence
 7. Jobs survive server restarts — timers are rehydrated from `.data/jobs/jobs.json`
 
 > **Limit / After / Before fields are hidden in Scheduled Job mode.** Scheduled jobs use `channel + cadence + since` only. These fields remain supported for Manual Run mode and via the API directly.
+
+#### Editing a Scheduled Job
+
+Each row in the Scheduled Jobs table has a **✏ Edit** button that opens the Edit modal:
+
+1. Click **✏ Edit** on any job row
+2. In the modal, update any combination of:
+   - **Job Name** — human-readable label stored with the job
+   - **Channel ID** — Discord channel to sync
+   - **Cadence** — how often the job runs (compact dropdown: 1M → 1Y)
+   - **Since** — lookback window per run (compact dropdown: 1M → ALL)
+   - **Enabled** — checkbox to pause or resume the job
+3. The **Link 🔗** checkbox (between Cadence and Since) keeps Since in sync with Cadence:
+   - **Link ON**: Since is disabled and always mirrors Cadence. Changing Cadence also updates Since.
+   - **Link OFF**: Since is independent and freely selectable.
+   - **Default**: Link is ON automatically when the job's current Cadence and Since match (or Since is unset and inherits from Cadence).
+4. Click **Save Changes** — the job is updated and the scheduler re-schedules it immediately.
+5. Click **Cancel** or click outside the modal to dismiss without saving.
 
 ---
 
@@ -101,27 +123,29 @@ http://localhost:3456/sync
 Scheduled jobs fire at **natural UTC boundaries**, not "now + interval" drift.
 This means the run times are predictable and consistent across server restarts.
 
-| Preset | Label | Boundary Rule (UTC) | `intervalMinutes` |
-|--------|-------|---------------------|:-----------------:|
-| `1m`   | Every 1 minute     | HH:MM:00 each minute             | 1      |
-| `5m`   | Every 5 minutes    | minute % 5 == 0                  | 5      |
-| `15m`  | Every 15 minutes   | :00/:15/:30/:45 each hour        | 15     |
-| `30m`  | Every 30 minutes   | :00/:30 each hour                | 30     |
-| `1h`   | Every 1 hour       | top of each hour                 | 60     |
-| `2h`   | Every 2 hours      | hour % 2 == 0                    | 120    |
-| `4h`   | Every 4 hours      | hour % 4 == 0                    | 240    |
-| `6h`   | Every 6 hours      | hour % 6 == 0                    | 360    |
-| `12h`  | Every 12 hours     | midnight & noon                  | 720    |
-| `1d`   | Every day          | midnight UTC                     | 1440   |
-| `3d`   | Every 3 days       | every 3rd day from Unix epoch, midnight UTC | 4320 |
-| `1w`   | Every week         | Monday 00:00 UTC                 | 10080  |
-| `2w`   | Every 2 weeks      | biweekly Monday 00:00 UTC ¹      | 20160  |
-| `1mo`  | Every month        | 1st of each month, 00:00 UTC     | 43200  |
-| `2mo`  | Every 2 months     | 1st of Jan/Mar/May/Jul/Sep/Nov, 00:00 UTC | 86400 |
-| `3mo`  | Every quarter      | 1st of Jan/Apr/Jul/Oct, 00:00 UTC | 129600 |
-| `4mo`  | Every 4 months     | 1st of Jan/May/Sep, 00:00 UTC    | 172800 |
-| `6mo`  | Every 6 months     | 1st of Jan/Jul, 00:00 UTC        | 259200 |
-| `1y`   | Every year         | Jan 1, 00:00 UTC                 | 525960 |
+The UI uses compact labels in all dropdowns. The compact format: `1M`, `5M`, `15M`, `30M`, `1H`, `2H`, `4H`, `6H`, `12H`, `1D`, `3D`, `1W`, `2W`, `1MO`, `2MO`, `3MO`, `4MO`, `6MO`, `1Y`.
+
+| Preset | UI Label | Boundary Rule (UTC) | `intervalMinutes` |
+|--------|----------|---------------------|:-----------------:|
+| `1m`   | 1M  | HH:MM:00 each minute             | 1      |
+| `5m`   | 5M  | minute % 5 == 0                  | 5      |
+| `15m`  | 15M | :00/:15/:30/:45 each hour        | 15     |
+| `30m`  | 30M | :00/:30 each hour                | 30     |
+| `1h`   | 1H  | top of each hour                 | 60     |
+| `2h`   | 2H  | hour % 2 == 0                    | 120    |
+| `4h`   | 4H  | hour % 4 == 0                    | 240    |
+| `6h`   | 6H  | hour % 6 == 0                    | 360    |
+| `12h`  | 12H | midnight & noon                  | 720    |
+| `1d`   | 1D  | midnight UTC                     | 1440   |
+| `3d`   | 3D  | every 3rd day from Unix epoch, midnight UTC | 4320 |
+| `1w`   | 1W  | Monday 00:00 UTC                 | 10080  |
+| `2w`   | 2W  | biweekly Monday 00:00 UTC ¹      | 20160  |
+| `1mo`  | 1MO | 1st of each month, 00:00 UTC     | 43200  |
+| `2mo`  | 2MO | 1st of Jan/Mar/May/Jul/Sep/Nov, 00:00 UTC | 86400 |
+| `3mo`  | 3MO | 1st of Jan/Apr/Jul/Oct, 00:00 UTC | 129600 |
+| `4mo`  | 4MO | 1st of Jan/May/Sep, 00:00 UTC    | 172800 |
+| `6mo`  | 6MO | 1st of Jan/Jul, 00:00 UTC        | 259200 |
+| `1y`   | 1Y  | Jan 1, 00:00 UTC                 | 525960 |
 
 ¹ Biweekly anchor: **1970-01-05** (Monday, 4 days after Unix epoch). Two-week cycles count forward from this date.
 
@@ -203,34 +227,34 @@ The channel name is resolved via the Discord API at creation time. If resolution
 
 ## Since Presets (Lookback Windows)
 
-The **Since** dropdown in Manual mode (and optionally in Scheduled mode) controls how far back to fetch messages.
+The **Since** dropdown in Manual mode (and optionally in Scheduled mode) controls how far back to fetch messages. Both the cadence and since dropdowns use the same compact label format for consistency.
 
-| Preset | Window |
-|--------|--------|
-| `1m`   | Last 1 minute |
-| `5m`   | Last 5 minutes |
-| `15m`  | Last 15 minutes |
-| `30m`  | Last 30 minutes |
-| `1h`   | Last 1 hour |
-| `2h`   | Last 2 hours |
-| `4h`   | Last 4 hours |
-| `6h`   | Last 6 hours |
-| `12h`  | Last 12 hours |
-| `1d`   | Last 1 day |
-| `3d`   | Last 3 days |
-| `1w`   | Last 1 week |
-| `2w`   | Last 2 weeks |
-| `1mo`  | Last ~30 days |
-| `2mo`  | Last ~60 days |
-| `3mo`  | Last ~90 days |
-| `4mo`  | Last ~120 days |
-| `6mo`  | Last ~180 days |
-| `1y`   | Last ~365 days |
-| `3y`   | Last ~3 years |
-| `5y`   | Last ~5 years |
-| `10y`  | Last ~10 years |
-| `20y`  | Last ~20 years |
-| `all`  | All time (from beginning) |
+| Preset | UI Label | Window |
+|--------|----------|--------|
+| `1m`   | 1M   | Last 1 minute |
+| `5m`   | 5M   | Last 5 minutes |
+| `15m`  | 15M  | Last 15 minutes |
+| `30m`  | 30M  | Last 30 minutes |
+| `1h`   | 1H   | Last 1 hour |
+| `2h`   | 2H   | Last 2 hours |
+| `4h`   | 4H   | Last 4 hours |
+| `6h`   | 6H   | Last 6 hours |
+| `12h`  | 12H  | Last 12 hours |
+| `1d`   | 1D   | Last 1 day |
+| `3d`   | 3D   | Last 3 days |
+| `1w`   | 1W   | Last 1 week |
+| `2w`   | 2W   | Last 2 weeks |
+| `1mo`  | 1MO  | Last ~30 days |
+| `2mo`  | 2MO  | Last ~60 days |
+| `3mo`  | 3MO  | Last ~90 days |
+| `4mo`  | 4MO  | Last ~120 days |
+| `6mo`  | 6MO  | Last ~180 days |
+| `1y`   | 1Y   | Last ~365 days |
+| `3y`   | 3Y   | Last ~3 years |
+| `5y`   | 5Y   | Last ~5 years |
+| `10y`  | 10Y  | Last ~10 years |
+| `20y`  | 20Y  | Last ~20 years |
+| `all`  | ALL  | All time (from beginning) |
 
 **How it works:** At run time, the preset is resolved to an effective "after" Discord snowflake ID by computing `now − presetMs`. This snowflake is passed to the Discord messages API as the `after` parameter.
 
@@ -242,12 +266,12 @@ The **Since** dropdown in Manual mode (and optionally in Scheduled mode) control
 |--------|-------------|
 | Name | Human-readable job name (auto-generated if left blank at creation) |
 | Channel | Discord channel ID |
-| Cadence | Preset label with boundary tooltip (hover for the rule). Legacy jobs without cadencePreset show raw minutes. |
-| Since/After | Since preset or static after ID used for lookback |
+| Cadence | Compact preset label with boundary tooltip (hover for the rule). Legacy jobs without cadencePreset show raw minutes. |
+| Since | Compact since preset label, or static after ID used for lookback |
 | Status | enabled / disabled |
 | Last Run | Relative time of last execution |
 | Last Result | success / error / never |
-| Actions | ▶ Run now · Enable/Disable · ✕ Delete |
+| Actions | ▶ Run now · ✏ Edit · Enable/Disable · ✕ Delete |
 
 ---
 
@@ -330,13 +354,21 @@ Trigger a scheduled job immediately (async, fire-and-forget). Check `/api/runs` 
 ### `PATCH /api/jobs/:id`
 
 Update job fields. Supports `cadencePreset` (re-derives `intervalMinutes` automatically).
+The scheduler re-schedules the job immediately after a successful update.
+In the UI, the **✏ Edit** button per job row opens a modal backed by this endpoint.
 
 ```bash
-# Change cadence
+# Change cadence and since together
 curl -X PATCH http://localhost:3456/api/jobs/<id> \
   -H "Authorization: Bearer your-token" \
   -H "Content-Type: application/json" \
-  -d '{"cadencePreset":"6h"}'
+  -d '{"cadencePreset":"6h","sincePreset":"6h"}'
+
+# Change name and channel
+curl -X PATCH http://localhost:3456/api/jobs/<id> \
+  -H "Authorization: Bearer your-token" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"My Renamed Job","channel":"111222333444555666"}'
 
 # Disable a job
 curl -X PATCH http://localhost:3456/api/jobs/<id> \
@@ -344,6 +376,8 @@ curl -X PATCH http://localhost:3456/api/jobs/<id> \
   -H "Content-Type: application/json" \
   -d '{"enabled":false}'
 ```
+
+Supported patch fields: `name`, `channel`, `cadencePreset`, `sincePreset`, `enabled`, `intervalMinutes` (legacy), `limit`, `after`, `before`.
 
 ### `DELETE /api/jobs/:id`
 

@@ -238,6 +238,37 @@ export function isSincePreset(value: unknown): value is SincePreset {
   return typeof value === 'string' && (SINCE_PRESETS as readonly string[]).includes(value);
 }
 
+// ── Compact (unified) preset labels ────────────────────────────────────────────
+// Used in UI dropdowns for both cadence and since selectors.
+// Short, consistent format: 1M, 5M, 15M, 30M, 1H, 2H, 4H, 6H, 12H, 1D, 3D, 1W, 2W,
+//   1MO, 2MO, 3MO, 4MO, 6MO, 1Y, 3Y, 5Y, 10Y, 20Y, ALL
+export const COMPACT_PRESET_LABELS: Record<SincePreset, string> = {
+  '1m':  '1M',
+  '5m':  '5M',
+  '15m': '15M',
+  '30m': '30M',
+  '1h':  '1H',
+  '2h':  '2H',
+  '4h':  '4H',
+  '6h':  '6H',
+  '12h': '12H',
+  '1d':  '1D',
+  '3d':  '3D',
+  '1w':  '1W',
+  '2w':  '2W',
+  '1mo': '1MO',
+  '2mo': '2MO',
+  '3mo': '3MO',
+  '4mo': '4MO',
+  '6mo': '6MO',
+  '1y':  '1Y',
+  '3y':  '3Y',
+  '5y':  '5Y',
+  '10y': '10Y',
+  '20y': '20Y',
+  'all': 'ALL',
+};
+
 // ── Boundary-aligned scheduling ─────────────────────────────────────────────
 
 /**

@@ -22,6 +22,7 @@ import {
   CADENCE_PRESET_LABELS,
   CADENCE_BOUNDARY_LABELS,
   CADENCE_PRESET_MINUTES,
+  COMPACT_PRESET_LABELS,
   type SincePreset,
   type CadencePreset,
 } from './since-presets.js';
@@ -253,7 +254,7 @@ router.post('/api/jobs', requireAuth, async (req: Request, res: Response) => {
       if (fetched) channelLabel = fetched;
     }
     const cadenceLabel = cadencePreset
-      ? SINCE_PRESET_LABELS[cadencePreset as SincePreset]
+      ? COMPACT_PRESET_LABELS[cadencePreset as SincePreset]
       : `${intervalMinutes}m`;
     jobName = `#${channelLabel} every ${cadenceLabel}`;
   }
@@ -419,21 +420,25 @@ router.get('/api/runs', requireAuth, async (req: Request, res: Response) => {
 function buildSyncUI(): string {
   const requiresAuth = Boolean(process.env.UI_TOKEN);
 
-  // Build cadence dropdown options (injected server-side)
+  // Build cadence dropdown options using compact labels (injected server-side)
   const cadenceOptions = CADENCE_PRESETS.map(p =>
-    `<option value="${p}">${CADENCE_PRESET_LABELS[p]}</option>`
+    `<option value="${p}">${COMPACT_PRESET_LABELS[p as SincePreset]}</option>`
   ).join('\n      ');
 
-  // Build since dropdown options (all since presets)
+  // Build since dropdown options using compact labels (all since presets)
   const sinceOptions = SINCE_PRESETS.map(p =>
-    `<option value="${p}">${SINCE_PRESET_LABELS[p]}</option>`
+    `<option value="${p}">${COMPACT_PRESET_LABELS[p]}</option>`
   ).join('\n      ');
 
   // JSON blobs injected into the page for client-side JS
-  const jsCadenceLabels = JSON.stringify(
-    Object.fromEntries(CADENCE_PRESETS.map(p => [p, SINCE_PRESET_LABELS[p as SincePreset]]))
+  // COMPACT_LABELS covers all SINCE_PRESETS (a superset of CADENCE_PRESETS)
+  const jsCompactLabels = JSON.stringify(
+    Object.fromEntries(SINCE_PRESETS.map(p => [p, COMPACT_PRESET_LABELS[p]]))
   );
   const jsCadenceBoundaries = JSON.stringify(CADENCE_BOUNDARY_LABELS);
+  // Arrays for dynamic modal construction in browser JS
+  const jsCadencePresetsArr = JSON.stringify(CADENCE_PRESETS);
+  const jsAllSincePresetsArr = JSON.stringify(SINCE_PRESETS);
 
   return /* html */ `<!DOCTYPE html>
 <html lang="en">
@@ -523,6 +528,22 @@ tbody tr:hover td{background:rgba(255,255,255,.03)}
 /* boundary info box */
 .boundary-info{font-size:.74rem;color:#9ca3af;background:#1e2124;border:1px solid #3d4046;border-radius:5px;padding:6px 9px;margin-top:5px;line-height:1.4}
 .boundary-info strong{color:#d1d5db}
+/* Edit job modal */
+.edit-modal-card{max-width:520px;border-color:#555}
+.edit-modal-card h2{margin-bottom:14px}
+.edit-row{display:flex;gap:12px;align-items:flex-end;margin-bottom:14px}
+.edit-row .edit-col{flex:1;min-width:0}
+.edit-row .edit-col label{display:block;font-size:.78rem;font-weight:600;color:#aaa;text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px}
+.edit-row .edit-col select{width:100%}
+.edit-link-col{display:flex;flex-direction:column;align-items:center;padding-bottom:4px;gap:3px;min-width:44px}
+.edit-link-col .link-label{font-size:.68rem;color:#888;text-transform:uppercase;letter-spacing:.04em}
+.edit-link-col input[type=checkbox]{width:20px;height:20px;cursor:pointer;accent-color:#7289da}
+.edit-enabled-row{display:flex;align-items:center;gap:8px;margin-bottom:14px}
+.edit-enabled-row input[type=checkbox]{width:16px;height:16px;cursor:pointer;accent-color:#7289da;flex-shrink:0}
+.edit-enabled-row label{font-size:.88rem;color:#ccc;text-transform:none;letter-spacing:0;margin-bottom:0;cursor:pointer}
+.edit-err{color:#f87171;font-size:.8rem;margin-bottom:8px;display:none}
+.edit-footer{display:flex;gap:8px;justify-content:flex-end;margin-top:6px}
+.edit-footer .btn-primary{width:auto;margin-top:0;padding:8px 20px;font-size:.88rem}
 </style>
 </head>
 <body>
@@ -674,10 +695,16 @@ tbody tr:hover td{background:rgba(255,255,255,.03)}
 const REQUIRES_AUTH = ${requiresAuth ? 'true' : 'false'};
 const TOKEN_KEY = 'discord_sync_ui_token';
 
-// Cadence short labels ("1 hour", "15 minutes", …) keyed by preset string
-const CADENCE_LABELS = ${jsCadenceLabels};
+// Compact labels for ALL since presets (1M, 5M, 1H, 1D, 1MO, ALL, …) keyed by preset string.
+// Used for both cadence and since dropdowns — unified format.
+const COMPACT_LABELS = ${jsCompactLabels};
+// Backward-compat alias for places that still reference CADENCE_LABELS
+const CADENCE_LABELS = COMPACT_LABELS;
 // Boundary descriptions keyed by preset string
 const CADENCE_BOUNDARIES = ${jsCadenceBoundaries};
+// Ordered arrays for modal construction
+const CADENCE_PRESET_VALUES = ${jsCadencePresetsArr};
+const ALL_SINCE_PRESET_VALUES = ${jsAllSincePresetsArr};
 
 // ── Token management ────────────────────────────────────────────────────────
 function getToken() { return localStorage.getItem(TOKEN_KEY) || ''; }
@@ -922,12 +949,16 @@ function showResult(type, label, data) {
 }
 
 // ── Jobs table ──────────────────────────────────────────────────────────────
+// ── Jobs cache (used by edit modal to avoid extra fetch) ────────────────────
+let _loadedJobs = [];
+
 async function loadJobsTable() {
   const el = document.getElementById('jobs-container');
   try {
     const res = await fetch('/api/jobs', { headers: getHeaders() });
     if (res.status === 401) { el.innerHTML = '<p style="color:#f87171;font-size:.85rem">Not authenticated.</p>'; return; }
     const jobs = await res.json();
+    _loadedJobs = jobs;
     el.innerHTML = renderJobsTable(jobs);
   } catch (err) {
     el.innerHTML = '<p style="color:#f87171;font-size:.85rem">Error loading jobs: ' + esc(err.message) + '</p>';
@@ -950,13 +981,14 @@ function renderJobsTable(jobs) {
     const toggleLabel = j.enabled ? 'Disable' : 'Enable';
     const toggleClass = j.enabled ? 'btn-warn' : 'btn-success';
 
-    // Cadence cell: show preset label with boundary tooltip, or fallback to minutes
+    // Cadence cell: show compact label with boundary tooltip, or fallback to minutes
     const cadenceCell = j.cadencePreset
-      ? \`<span class="status-pill pill-blue" title="\${esc(CADENCE_BOUNDARIES[j.cadencePreset] || '')}">\${esc(CADENCE_LABELS[j.cadencePreset] || j.cadencePreset)}</span>\`
+      ? \`<span class="status-pill pill-blue" title="\${esc(CADENCE_BOUNDARIES[j.cadencePreset] || '')}">\${esc(COMPACT_LABELS[j.cadencePreset] || j.cadencePreset)}</span>\`
       : \`<span class="mono">\${j.intervalMinutes}m</span>\`;
 
+    // Since cell: show compact label, static after ID, or dash
     const sinceCell = j.sincePreset
-      ? \`<span class="status-pill pill-run" title="Resolved at runtime to effective after snowflake">\${esc(j.sincePreset)}</span>\`
+      ? \`<span class="status-pill pill-run" title="Resolved at runtime to effective after snowflake">\${esc(COMPACT_LABELS[j.sincePreset] || j.sincePreset)}</span>\`
       : (j.after ? \`<span class="mono" style="font-size:.72rem" title="Static after ID">\${esc(j.after.slice(0,12))}…</span>\` : '—');
 
     return \`<tr>
@@ -970,6 +1002,7 @@ function renderJobsTable(jobs) {
       <td><div class="actions">
         <button class="btn btn-sm btn-run" onclick="triggerJobRun('\${esc(j.id)}', this)">▶ Run</button>
         <button class="btn btn-sm btn-primary" onclick="triggerJobRunAll('\${esc(j.id)}', this)">⟳ Run All</button>
+        <button class="btn btn-sm btn-ghost" onclick="editJob('\${esc(j.id)}')">✏ Edit</button>
         <button class="btn btn-sm \${toggleClass}" onclick="toggleJob('\${esc(j.id)}', \${!j.enabled}, this)">\${toggleLabel}</button>
         <button class="btn btn-sm btn-danger" onclick="removeJob('\${esc(j.id)}', this)">✕</button>
       </div></td>
@@ -978,10 +1011,162 @@ function renderJobsTable(jobs) {
 
   return \`<table>
     <thead><tr>
-      <th>Name</th><th>Channel</th><th>Cadence</th><th>Since/After</th><th>Status</th><th>Last Run</th><th>Last Result</th><th>Actions</th>
+      <th>Name</th><th>Channel</th><th>Cadence</th><th>Since</th><th>Status</th><th>Last Run</th><th>Last Result</th><th>Actions</th>
     </tr></thead>
     <tbody>\${rows}</tbody>
   </table>\`;
+}
+
+// ── Edit job modal ──────────────────────────────────────────────────────────
+let _editJobId = null;
+
+function editJob(id) {
+  const job = _loadedJobs.find(function(j) { return j.id === id; });
+  if (!job) { alert('Job not found — refresh and try again.'); return; }
+  openEditModal(job);
+}
+
+function openEditModal(job) {
+  _editJobId = job.id;
+
+  const cadence = job.cadencePreset || '';
+  const since = job.sincePreset !== undefined ? job.sincePreset : cadence;
+  // Default link ON when cadence==since (or since inherits from cadence)
+  const linked = cadence !== '' && (job.sincePreset === cadence || job.sincePreset === undefined);
+
+  // Build cadence options
+  const cadenceOpts = CADENCE_PRESET_VALUES.map(function(p) {
+    return '<option value="' + esc(p) + '"' + (p === cadence ? ' selected' : '') + '>' + esc(COMPACT_LABELS[p] || p) + '</option>';
+  }).join('');
+
+  // Build since options (all since presets)
+  const sinceOpts = ALL_SINCE_PRESET_VALUES.map(function(p) {
+    return '<option value="' + esc(p) + '"' + (p === since ? ' selected' : '') + '>' + esc(COMPACT_LABELS[p] || p) + '</option>';
+  }).join('');
+
+  const existingOverlay = document.getElementById('edit-modal-overlay');
+  if (existingOverlay) existingOverlay.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'edit-modal-overlay';
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML =
+    '<div class="modal-card edit-modal-card">' +
+      '<h2>✏️ Edit Scheduled Job</h2>' +
+      '<div class="field">' +
+        '<label>Job Name</label>' +
+        '<input type="text" id="edit-name" value="' + esc(job.name) + '" placeholder="Job name"/>' +
+      '</div>' +
+      '<div class="field">' +
+        '<label>Channel ID</label>' +
+        '<input type="text" id="edit-channel" value="' + esc(job.channel) + '" placeholder="Discord channel ID"/>' +
+      '</div>' +
+      '<div class="edit-row">' +
+        '<div class="edit-col">' +
+          '<label>Cadence</label>' +
+          '<select id="edit-cadence" onchange="onEditCadenceChange()">' + cadenceOpts + '</select>' +
+        '</div>' +
+        '<div class="edit-link-col">' +
+          '<span class="link-label">Link</span>' +
+          '<input type="checkbox" id="edit-link"' + (linked ? ' checked' : '') + ' onchange="onEditLinkChange()" title="When linked, Since always matches Cadence"/>' +
+        '</div>' +
+        '<div class="edit-col">' +
+          '<label>Since</label>' +
+          '<select id="edit-since"' + (linked ? ' disabled style="opacity:.55"' : '') + '>' + sinceOpts + '</select>' +
+        '</div>' +
+      '</div>' +
+      '<div class="edit-enabled-row">' +
+        '<input type="checkbox" id="edit-enabled"' + (job.enabled ? ' checked' : '') + '/>' +
+        '<label for="edit-enabled">Job is enabled</label>' +
+      '</div>' +
+      '<div class="edit-err" id="edit-err"></div>' +
+      '<div class="edit-footer">' +
+        '<button class="btn btn-ghost" onclick="closeEditModal()">Cancel</button>' +
+        '<button class="btn btn-primary" id="edit-save-btn" onclick="saveEditJob()">Save Changes</button>' +
+      '</div>' +
+    '</div>';
+
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) closeEditModal(); });
+  document.body.appendChild(overlay);
+}
+
+function closeEditModal() {
+  const overlay = document.getElementById('edit-modal-overlay');
+  if (overlay) overlay.remove();
+  _editJobId = null;
+}
+
+function onEditCadenceChange() {
+  if (!document.getElementById('edit-link').checked) return;
+  const cadence = document.getElementById('edit-cadence').value;
+  const sinceEl = document.getElementById('edit-since');
+  sinceEl.value = cadence;
+}
+
+function onEditLinkChange() {
+  const linked = document.getElementById('edit-link').checked;
+  const sinceEl = document.getElementById('edit-since');
+  if (linked) {
+    const cadence = document.getElementById('edit-cadence').value;
+    sinceEl.value = cadence;
+    sinceEl.disabled = true;
+    sinceEl.style.opacity = '.55';
+  } else {
+    sinceEl.disabled = false;
+    sinceEl.style.opacity = '';
+  }
+}
+
+async function saveEditJob() {
+  if (!_editJobId) return;
+  const name = document.getElementById('edit-name').value.trim();
+  const channel = document.getElementById('edit-channel').value.trim();
+  const cadence = document.getElementById('edit-cadence').value;
+  const linked = document.getElementById('edit-link').checked;
+  const since = linked ? cadence : document.getElementById('edit-since').value;
+  const enabled = document.getElementById('edit-enabled').checked;
+
+  const errEl = document.getElementById('edit-err');
+  errEl.style.display = 'none';
+
+  if (!channel) {
+    errEl.textContent = 'Channel ID is required.';
+    errEl.style.display = 'block';
+    return;
+  }
+
+  const saveBtn = document.getElementById('edit-save-btn');
+  saveBtn.disabled = true;
+  saveBtn.innerHTML = '<span class="spinner"></span> Saving\u2026';
+
+  const body = { enabled: enabled };
+  if (name) body.name = name;
+  if (channel) body.channel = channel;
+  if (cadence) body.cadencePreset = cadence;
+  if (since) body.sincePreset = since;
+
+  try {
+    const res = await fetch('/api/jobs/' + _editJobId, {
+      method: 'PATCH',
+      headers: getHeaders(),
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (res.ok && data.id) {
+      closeEditModal();
+      loadJobsTable();
+    } else {
+      errEl.textContent = data.error || 'Unknown error';
+      errEl.style.display = 'block';
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save Changes';
+    }
+  } catch (err) {
+    errEl.textContent = 'Network error: ' + err.message;
+    errEl.style.display = 'block';
+    saveBtn.disabled = false;
+    saveBtn.textContent = 'Save Changes';
+  }
 }
 
 async function triggerJobRun(id, btn) {
