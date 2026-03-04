@@ -225,8 +225,16 @@ export function handleDiscordLoginWs(req: IncomingMessage, socket: Duplex, head:
                   params: {
                     expression: `(
                       function() {
-                        const token = localStorage.getItem('token');
-                        return token ? JSON.parse(token) : null;
+                        const raw = localStorage.getItem('token');
+                        if (!raw) return null;
+                        try {
+                          const parsed = JSON.parse(raw);
+                          if (typeof parsed === 'string') return parsed;
+                          if (parsed && typeof parsed.token === 'string') return parsed.token;
+                          return String(parsed);
+                        } catch {
+                          return raw.replace(/^\"|\"$/g, '');
+                        }
                       }
                     )()`,
                     returnByValue: true,
@@ -278,10 +286,16 @@ export function handleDiscordLoginWs(req: IncomingMessage, socket: Duplex, head:
               params: {
                 expression: `(
                   function() {
+                    const raw = localStorage.getItem('token');
+                    if (!raw) return null;
                     try {
-                      const token = localStorage.getItem('token');
-                      return token ? JSON.parse(token) : null;
-                    } catch { return null; }
+                      const parsed = JSON.parse(raw);
+                      if (typeof parsed === 'string') return parsed;
+                      if (parsed && typeof parsed.token === 'string') return parsed.token;
+                      return String(parsed);
+                    } catch {
+                      return raw.replace(/^\"|\"$/g, '');
+                    }
                   }
                 )()`,
                 returnByValue: true,
