@@ -12,8 +12,19 @@ export interface RunLog {
   channel: string;
   params: {
     limit?: number;
+    /** Static after-message-ID provided by caller (may be overridden by sincePreset). */
     after?: string;
     before?: string;
+    /**
+     * The since preset used for this run (e.g. '1h').
+     * When set, sincePreset took precedence over any explicit `after`.
+     */
+    sincePreset?: string;
+    /**
+     * The resolved Discord snowflake used as the effective `after` filter.
+     * Populated when sincePreset is used; equals the static `after` otherwise.
+     */
+    effectiveAfter?: string;
   };
   fetchedCount: number;
   insertedCount: number;

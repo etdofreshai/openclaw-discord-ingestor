@@ -12,6 +12,13 @@ import {
 } from './job-store.js';
 import { getRecentRuns, createRun, updateRun } from './run-store.js';
 import { scheduleJob, unscheduleJob, runJobNow } from './scheduler.js';
+import {
+  isSincePreset,
+  resolveSincePreset,
+  SINCE_PRESETS,
+  SINCE_PRESET_LABELS,
+  type SincePreset,
+} from './since-presets.js';
 
 const router = Router();
 
@@ -47,15 +54,24 @@ router.get('/sync', (_req: Request, res: Response) => {
 // ── API: manual sync ────────────────────────────────────────────────────────────
 
 router.post('/api/sync', requireAuth, async (req: Request, res: Response) => {
-  const { channel, limit, before, after } = req.body as {
+  const { channel, limit, before, after, sincePreset: sincePresetRaw } = req.body as {
     channel?: string;
     limit?: string | number;
     before?: string;
     after?: string;
+    sincePreset?: string;
   };
 
   if (!channel || typeof channel !== 'string' || !channel.trim()) {
     res.status(400).json({ error: 'channel is required.' });
+    return;
+  }
+
+  // Validate sincePreset if provided
+  const sincePreset: SincePreset | undefined =
+    sincePresetRaw && isSincePreset(sincePresetRaw) ? sincePresetRaw : undefined;
+  if (sincePresetRaw && !sincePreset) {
+    res.status(400).json({ error: `Invalid sincePreset '${sincePresetRaw}'. Valid values: ${SINCE_PRESETS.join(', ')}` });
     return;
   }
 
@@ -80,12 +96,25 @@ router.post('/api/sync', requireAuth, async (req: Request, res: Response) => {
   const parsedLimit =
     limit !== undefined && limit !== '' ? parseInt(String(limit), 10) : undefined;
 
-  const startedAt = new Date().toISOString();
+  // Resolve effective after: sincePreset overrides explicit `after`
+  const staticAfter = after?.trim() || undefined;
+  const now = new Date();
+  const effectiveAfter = sincePreset
+    ? resolveSincePreset(sincePreset, now)
+    : staticAfter;
+
+  const startedAt = now.toISOString();
   const run = await createRun({
     startedAt,
     status: 'running',
     channel: channel.trim(),
-    params: { limit: parsedLimit, after: after?.trim() || undefined, before: before?.trim() || undefined },
+    params: {
+      limit: parsedLimit,
+      after: staticAfter,
+      before: before?.trim() || undefined,
+      sincePreset: sincePreset,
+      effectiveAfter,
+    },
     fetchedCount: 0,
     insertedCount: 0,
     updatedCount: 0,
@@ -98,7 +127,7 @@ router.post('/api/sync', requireAuth, async (req: Request, res: Response) => {
     const result = await syncChannelToDB(pool, session, channel.trim(), {
       limit: parsedLimit,
       before: before?.trim() || undefined,
-      after: after?.trim() || undefined,
+      after: effectiveAfter,
       verbose: false,
     });
 
@@ -118,6 +147,8 @@ router.post('/api/sync', requireAuth, async (req: Request, res: Response) => {
       runId: run.runId,
       channel: channel.trim(),
       user: `${user.username}#${user.discriminator}`,
+      sincePreset: sincePreset ?? null,
+      effectiveAfter: effectiveAfter ?? null,
       ...result,
     });
   } catch (err: unknown) {
@@ -141,12 +172,13 @@ router.get('/api/jobs', requireAuth, async (_req: Request, res: Response) => {
 });
 
 router.post('/api/jobs', requireAuth, async (req: Request, res: Response) => {
-  const { name, channel, limit, after, before, intervalMinutes, enabled } = req.body as {
+  const { name, channel, limit, after, before, sincePreset: sincePresetRaw, intervalMinutes, enabled } = req.body as {
     name?: string;
     channel?: string;
     limit?: number;
     after?: string;
     before?: string;
+    sincePreset?: string;
     intervalMinutes?: number;
     enabled?: boolean;
   };
@@ -160,12 +192,20 @@ router.post('/api/jobs', requireAuth, async (req: Request, res: Response) => {
     return;
   }
 
+  const sincePreset: SincePreset | undefined =
+    sincePresetRaw && isSincePreset(sincePresetRaw) ? sincePresetRaw : undefined;
+  if (sincePresetRaw && !sincePreset) {
+    res.status(400).json({ error: `Invalid sincePreset '${sincePresetRaw}'. Valid values: ${SINCE_PRESETS.join(', ')}` });
+    return;
+  }
+
   const job = await createJob({
     name: name.trim(),
     channel: channel.trim(),
     limit: limit !== undefined ? Number(limit) : undefined,
     after: after?.trim() || undefined,
     before: before?.trim() || undefined,
+    sincePreset,
     intervalMinutes: Number(intervalMinutes) > 0 ? Number(intervalMinutes) : 60,
     enabled: enabled !== false,
   });
@@ -195,13 +235,14 @@ router.post('/api/jobs/:id/run', requireAuth, async (req: Request, res: Response
 
 router.patch('/api/jobs/:id', requireAuth, async (req: Request, res: Response) => {
   const {
-    name, channel, limit, after, before, intervalMinutes, enabled,
+    name, channel, limit, after, before, sincePreset: sincePresetRaw, intervalMinutes, enabled,
   } = req.body as {
     name?: string;
     channel?: string;
     limit?: number | null;
     after?: string | null;
     before?: string | null;
+    sincePreset?: string | null;
     intervalMinutes?: number;
     enabled?: boolean;
   };
@@ -215,6 +256,16 @@ router.patch('/api/jobs/:id', requireAuth, async (req: Request, res: Response) =
   if (before !== undefined) patch.before = before === null ? undefined : String(before).trim() || undefined;
   if (intervalMinutes !== undefined) patch.intervalMinutes = Math.max(1, Number(intervalMinutes));
   if (enabled !== undefined) patch.enabled = Boolean(enabled);
+  if (sincePresetRaw !== undefined) {
+    if (sincePresetRaw === null || sincePresetRaw === '') {
+      patch.sincePreset = undefined;
+    } else if (isSincePreset(sincePresetRaw)) {
+      patch.sincePreset = sincePresetRaw;
+    } else {
+      res.status(400).json({ error: `Invalid sincePreset '${sincePresetRaw}'. Valid values: ${SINCE_PRESETS.join(', ')}` });
+      return;
+    }
+  }
 
   const updated = await updateJob(jobId, patch as Parameters<typeof updateJob>[1]);
   if (!updated) {
@@ -334,6 +385,10 @@ tbody tr:hover td{background:rgba(255,255,255,.03)}
 .modal-card input:focus{border-color:#7289da}
 .modal-err{color:#f87171;font-size:.8rem;margin-bottom:8px;display:none}
 .scroll-x{overflow-x:auto}
+.field-disabled input,.field-disabled select{opacity:.45;cursor:not-allowed}
+.field-disabled label{opacity:.6}
+.since-override-note{font-size:.74rem;color:#f59e0b;margin-top:4px;display:none}
+.field-disabled .since-override-note{display:block}
 </style>
 </head>
 <body>
@@ -399,9 +454,19 @@ tbody tr:hover td{background:rgba(255,255,255,.03)}
   </div>
 
   <div class="field">
+    <label>Since <span class="badge badge-opt">optional</span></label>
+    <p class="field-hint">Fetch messages from the last N minutes/hours/days. Computed at run time from <em>now − window</em>. <strong>Precedence:</strong> when Since is set, it overrides any explicit After value.</p>
+    <select id="since-preset" onchange="onSinceChange()">
+      <option value="">— No preset (use After field or fetch latest) —</option>
+      ${SINCE_PRESETS.map(p => `<option value="${p}">${SINCE_PRESET_LABELS[p]}</option>`).join('\n      ')}
+    </select>
+  </div>
+
+  <div class="field" id="field-after">
     <label>After <span class="badge badge-opt">optional</span></label>
-    <p class="field-hint">Fetch messages <em>after</em> this message ID (exclusive). Paste the ID of the last message you have for incremental syncs.</p>
+    <p class="field-hint">Fetch messages <em>after</em> this message ID (exclusive). Paste the ID of the last message you have for incremental syncs. <em>Ignored when a Since preset is selected.</em></p>
     <input type="text" id="after" placeholder="e.g. 987654321098765432" autocomplete="off"/>
+    <div class="since-override-note">⚠ Since preset is active — this After value will be ignored.</div>
   </div>
 
   <div class="field">
@@ -521,6 +586,20 @@ function onModeChange() {
   document.getElementById('field-name').style.display = isScheduled ? '' : 'none';
   document.getElementById('field-interval').style.display = isScheduled ? '' : 'none';
   document.getElementById('submit-btn').textContent = isScheduled ? '📅 Create Scheduled Job' : '▶ Run Sync';
+  onSinceChange(); // re-evaluate after state
+}
+
+// ── Since preset selector ───────────────────────────────────────────────────
+function onSinceChange() {
+  const preset = document.getElementById('since-preset').value;
+  const fieldAfter = document.getElementById('field-after');
+  if (preset) {
+    fieldAfter.classList.add('field-disabled');
+    document.getElementById('after').disabled = true;
+  } else {
+    fieldAfter.classList.remove('field-disabled');
+    document.getElementById('after').disabled = false;
+  }
 }
 
 // ── Submit handler ──────────────────────────────────────────────────────────
@@ -538,7 +617,8 @@ async function handleRunSync() {
   if (!channel) { showResult('error', 'Channel ID is required.'); return; }
 
   const limit = document.getElementById('limit').value.trim();
-  const after = document.getElementById('after').value.trim();
+  const sincePreset = document.getElementById('since-preset').value;
+  const after = !sincePreset ? document.getElementById('after').value.trim() : '';
   const before = document.getElementById('before').value.trim();
 
   const btn = document.getElementById('submit-btn');
@@ -548,7 +628,8 @@ async function handleRunSync() {
   try {
     const body = { channel };
     if (limit) body.limit = parseInt(limit, 10);
-    if (after) body.after = after;
+    if (sincePreset) body.sincePreset = sincePreset;
+    else if (after) body.after = after;
     if (before) body.before = before;
 
     const res = await fetch('/api/sync', {
@@ -576,7 +657,8 @@ async function handleCreateJob() {
   const name = document.getElementById('job-name').value.trim();
   const channel = document.getElementById('channel').value.trim();
   const limit = document.getElementById('limit').value.trim();
-  const after = document.getElementById('after').value.trim();
+  const sincePreset = document.getElementById('since-preset').value;
+  const after = !sincePreset ? document.getElementById('after').value.trim() : '';
   const before = document.getElementById('before').value.trim();
   const interval = document.getElementById('interval').value.trim();
 
@@ -595,7 +677,8 @@ async function handleCreateJob() {
       enabled: true,
     };
     if (limit) body.limit = parseInt(limit, 10);
-    if (after) body.after = after;
+    if (sincePreset) body.sincePreset = sincePreset;
+    else if (after) body.after = after;
     if (before) body.before = before;
 
     const res = await fetch('/api/jobs', {
@@ -612,9 +695,11 @@ async function handleCreateJob() {
       document.getElementById('job-name').value = '';
       document.getElementById('channel').value = '';
       document.getElementById('limit').value = '';
+      document.getElementById('since-preset').value = '';
       document.getElementById('after').value = '';
       document.getElementById('before').value = '';
       document.getElementById('interval').value = '60';
+      onSinceChange(); // restore after field
     } else {
       showResult('error', '❌ Failed to create job (HTTP ' + res.status + ')', data);
     }
@@ -661,10 +746,14 @@ function renderJobsTable(jobs) {
     const lastRun = j.lastRunAt ? reltime(j.lastRunAt) : '—';
     const toggleLabel = j.enabled ? 'Disable' : 'Enable';
     const toggleClass = j.enabled ? 'btn-warn' : 'btn-success';
+    const sinceCell = j.sincePreset
+      ? \`<span class="status-pill pill-run" title="Resolved at runtime to effective after snowflake">\${esc(j.sincePreset)}</span>\`
+      : (j.after ? \`<span class="mono" style="font-size:.72rem" title="Static after ID">\${esc(j.after.slice(0,12))}…</span>\` : '—');
     return \`<tr>
       <td>\${esc(j.name)}</td>
       <td><span class="mono">\${esc(j.channel)}</span></td>
       <td>\${j.intervalMinutes}m</td>
+      <td>\${sinceCell}</td>
       <td>\${enabledPill}</td>
       <td>\${lastRun}</td>
       <td>\${statusPill}</td>
@@ -678,7 +767,7 @@ function renderJobsTable(jobs) {
 
   return \`<table>
     <thead><tr>
-      <th>Name</th><th>Channel</th><th>Every</th><th>Status</th><th>Last Run</th><th>Last Result</th><th>Actions</th>
+      <th>Name</th><th>Channel</th><th>Every</th><th>Since/After</th><th>Status</th><th>Last Run</th><th>Last Result</th><th>Actions</th>
     </tr></thead>
     <tbody>\${rows}</tbody>
   </table>\`;
@@ -753,11 +842,15 @@ function renderRunsTable(runs) {
     const source = r.jobId ? '<span class="mono" title="Job ID: ' + esc(r.jobId) + '">scheduled</span>' : 'manual';
     const errCell = r.error ? '<span class="err-text" title="' + esc(r.error) + '">' + esc(r.error.slice(0, 40)) + (r.error.length > 40 ? '…' : '') + '</span>' : '—';
     const dur = r.finishedAt ? Math.round((new Date(r.finishedAt) - new Date(r.startedAt)) / 1000) + 's' : '…';
+    const sinceCell = r.params && r.params.sincePreset
+      ? \`<span class="status-pill pill-run" title="effectiveAfter: \${esc(r.params.effectiveAfter || '')}">\${esc(r.params.sincePreset)}</span>\`
+      : (r.params && r.params.after ? \`<span class="mono" style="font-size:.72rem" title="\${esc(r.params.after)}">\${esc(r.params.after.slice(0,12))}…</span>\` : '—');
     return \`<tr>
       <td title="\${esc(r.startedAt)}">\${reltime(r.startedAt)}</td>
       <td>\${source}</td>
       <td><span class="mono">\${esc(r.channel)}</span></td>
       <td>\${statusPill}</td>
+      <td>\${sinceCell}</td>
       <td>\${r.fetchedCount}</td>
       <td>\${r.insertedCount}</td>
       <td>\${r.updatedCount}</td>
@@ -770,7 +863,7 @@ function renderRunsTable(runs) {
 
   return \`<table>
     <thead><tr>
-      <th>Started</th><th>Source</th><th>Channel</th><th>Status</th>
+      <th>Started</th><th>Source</th><th>Channel</th><th>Status</th><th>Since/After</th>
       <th>Fetched</th><th>Inserted</th><th>Updated</th><th>Skipped</th><th>Attachments</th>
       <th>Duration</th><th>Error</th>
     </tr></thead>

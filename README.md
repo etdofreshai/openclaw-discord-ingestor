@@ -76,7 +76,7 @@ http://localhost:3456/sync
 #### Manual Run
 
 1. Select **"Manual Run"** in the mode dropdown (default)
-2. Fill in Channel ID and optional Limit / After / Before
+2. Fill in Channel ID and optional Limit / Since / After / Before
 3. Click **▶ Run Sync**
 4. Result appears immediately below the form; run is logged to the Runs table
 
@@ -87,6 +87,38 @@ http://localhost:3456/sync
 3. Click **📅 Create Scheduled Job**
 4. Job appears in the Scheduled Jobs table; it runs automatically at the configured interval
 5. Jobs survive server restarts — timers are rehydrated from `.data/jobs/jobs.json`
+
+#### Since Preset (relative lookback window)
+
+The **Since** dropdown lets you specify a relative lookback window instead of a fixed "after" message ID.
+
+| Preset | Window |
+|--------|--------|
+| `15m` | Last 15 minutes |
+| `30m` | Last 30 minutes |
+| `1h` | Last 1 hour |
+| `2h` | Last 2 hours |
+| `4h` | Last 4 hours |
+| `6h` | Last 6 hours |
+| `12h` | Last 12 hours |
+| `1d` | Last 1 day |
+| `3d` | Last 3 days |
+| `1w` | Last 1 week |
+| `2w` | Last 2 weeks |
+| `1mo` | Last ~30 days |
+| `2mo` | Last ~60 days |
+| `3mo` | Last ~90 days |
+| `4mo` | Last ~120 days |
+| `6mo` | Last ~180 days |
+| `1y` | Last ~365 days |
+
+**How it works:** At run time, the preset is resolved to an effective "after" Discord snowflake ID by computing `now − presetMs`. This snowflake is passed to the Discord messages API as the `after` parameter.
+
+**Precedence rule:** `sincePreset` **overrides** any explicit `after` value when both are set.
+The static `after` field is ignored and the `sincePreset`-derived snowflake is used instead.
+The UI disables the `after` field when a preset is selected and shows a warning.
+
+This is ideal for scheduled jobs — e.g., a job running every hour with `since=1h` will always fetch only the last hour of messages, regardless of when it last ran.
 
 #### Scheduled Jobs table
 
@@ -140,8 +172,17 @@ Body params:
 |-------|----------|-------------|
 | `channel` | ✅ | Discord channel ID |
 | `limit` | optional | Max messages to fetch (1–100, default 100) |
-| `after` | optional | Fetch messages after this message ID |
+| `sincePreset` | optional | Relative lookback window (e.g. `"1h"`, `"1d"`). **Overrides `after` when set.** |
+| `after` | optional | Fetch messages after this message ID. Ignored when `sincePreset` is set. |
 | `before` | optional | Fetch messages before this message ID |
+
+**Example with sincePreset:**
+```bash
+curl -X POST http://localhost:3456/api/sync \
+  -H "Authorization: Bearer your-token" \
+  -H "Content-Type: application/json" \
+  -d '{"channel":"123456789012345678","sincePreset":"1h"}'
+```
 
 Response:
 ```json
@@ -150,6 +191,8 @@ Response:
   "runId": "uuid",
   "channel": "123456789012345678",
   "user": "username#0",
+  "sincePreset": "1h",
+  "effectiveAfter": "1331913827041280000",
   "fetched": 47,
   "inserted": 45,
   "updated": 2,
@@ -157,6 +200,8 @@ Response:
   "attachmentsSeen": 3
 }
 ```
+
+Valid `sincePreset` values: `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `12h`, `1d`, `3d`, `1w`, `2w`, `1mo`, `2mo`, `3mo`, `4mo`, `6mo`, `1y`
 
 ### `GET /api/jobs`
 
@@ -185,9 +230,18 @@ Body params:
 | `channel` | ✅ | Discord channel ID |
 | `intervalMinutes` | optional | Run interval (default 60, min 1) |
 | `limit` | optional | Max messages per run |
-| `after` | optional | Fixed after filter |
-| `before` | optional | Fixed before filter |
+| `sincePreset` | optional | Relative lookback window (e.g. `"1h"`). **Overrides `after` at each execution.** |
+| `after` | optional | Static after-message-ID filter. Ignored when `sincePreset` is set. |
+| `before` | optional | Static before-message-ID filter |
 | `enabled` | optional | Start enabled (default true) |
+
+**Example with sincePreset (recommended for recurring jobs):**
+```bash
+curl -X POST http://localhost:3456/api/jobs \
+  -H "Authorization: Bearer your-token" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"General 1h","channel":"123456789012345678","intervalMinutes":60,"sincePreset":"1h","enabled":true}'
+```
 
 ### `POST /api/jobs/:id/run`
 
@@ -312,6 +366,7 @@ src/
     ├── job-store.ts          # Job CRUD + .data/jobs/jobs.json persistence
     ├── run-store.ts          # Run log append/query + .data/runs/runs.json persistence
     ├── scheduler.ts          # In-process interval scheduler (rehydrates on start)
+    ├── since-presets.ts      # SincePreset type, labels, ms resolver, Discord snowflake converter
     └── sync-router.ts        # All /sync and /api/* routes + full-page HTML UI
 ```
 

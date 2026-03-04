@@ -4,6 +4,7 @@ import { createRun, updateRun } from './run-store.js';
 import { loadSession } from './session.js';
 import { validateToken } from './token-validator.js';
 import { syncChannelToDB } from './live-sync.js';
+import { resolveSincePreset } from './since-presets.js';
 
 // Track which jobs are currently executing (prevent overlapping runs)
 const runningJobs = new Set<string>();
@@ -46,7 +47,14 @@ async function executeJob(job: Job): Promise<void> {
 
   runningJobs.add(job.id);
 
-  const startedAt = new Date().toISOString();
+  // Resolve sincePreset → effective after snowflake at runtime.
+  // Precedence: sincePreset overrides explicit `after` when both are set.
+  const now = new Date();
+  const effectiveAfter = job.sincePreset
+    ? resolveSincePreset(job.sincePreset, now)
+    : job.after;
+
+  const startedAt = now.toISOString();
   await updateJob(job.id, { lastStatus: 'running', lastRunAt: startedAt });
 
   const run = await createRun({
@@ -58,6 +66,8 @@ async function executeJob(job: Job): Promise<void> {
       limit: job.limit,
       after: job.after,
       before: job.before,
+      sincePreset: job.sincePreset,
+      effectiveAfter,
     },
     fetchedCount: 0,
     insertedCount: 0,
@@ -69,12 +79,15 @@ async function executeJob(job: Job): Promise<void> {
   const pool = new pg.Pool({ connectionString: databaseUrl });
 
   try {
-    console.log(`[Scheduler] Starting job ${job.id} (${job.name}) — channel ${job.channel}`);
+    console.log(
+      `[Scheduler] Starting job ${job.id} (${job.name}) — channel ${job.channel}` +
+      (job.sincePreset ? ` — since=${job.sincePreset} (after=${effectiveAfter})` : '')
+    );
 
     const result = await syncChannelToDB(pool, session, job.channel, {
       limit: job.limit,
       before: job.before,
-      after: job.after,
+      after: effectiveAfter,
       verbose: true,
     });
 

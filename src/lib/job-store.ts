@@ -1,14 +1,22 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import type { SincePreset } from './since-presets.js';
 
 export interface Job {
   id: string;
   name: string;
   channel: string;
   limit?: number;
+  /** Static after-message-ID filter. Ignored when sincePreset is set. */
   after?: string;
   before?: string;
+  /**
+   * Relative lookback window preset (e.g. '1h', '1d').
+   * When set, takes precedence over the static `after` field.
+   * The effective `after` snowflake is computed at runtime from (now - preset).
+   */
+  sincePreset?: SincePreset;
   intervalMinutes: number;
   enabled: boolean;
   createdAt: string;
