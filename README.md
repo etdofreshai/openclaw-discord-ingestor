@@ -456,6 +456,7 @@ All runtime data is stored relative to the server's working directory:
 | `LOGIN_SERVER_PORT` | optional | `3456` | HTTP server port |
 | `CDP_PORT` | optional | `9222` | Chromium remote debugging port |
 | `PUPPETEER_EXECUTABLE_PATH` | optional | `/usr/bin/chromium` | Path to Chromium binary |
+| `SCHEDULE_SINCE_OVERLAP_PERCENT` | optional | `10` | Extra lookback applied to scheduled `since` runs to avoid edge misses (e.g. `1h` + 10% => 66m). |
 
 ---
 

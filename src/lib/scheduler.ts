@@ -4,7 +4,7 @@ import { createRun, updateRun } from './run-store.js';
 import { loadSession } from './session.js';
 import { validateToken } from './token-validator.js';
 import { syncChannelToDB, fetchChannelName } from './live-sync.js';
-import { resolveSincePreset, computeNextBoundary } from './since-presets.js';
+import { computeNextBoundary, sincePresetToMs, timestampToSnowflake } from './since-presets.js';
 
 // Track which jobs are currently executing (prevent overlapping runs)
 const runningJobs = new Set<string>();
@@ -62,8 +62,17 @@ async function executeJob(job: Job, overrides?: JobRunOverrides): Promise<void> 
   const runBefore = overrides?.before ?? job.before;
   const runLimit = overrides?.limit ?? job.limit;
 
+  // Optional overlap window for scheduled runs to avoid edge misses at boundaries.
+  // Default 10% (e.g., 1h cadence => 66m lookback). Safe because DB upserts are idempotent.
+  const overlapPctRaw = Number(process.env.SCHEDULE_SINCE_OVERLAP_PERCENT ?? '10');
+  const overlapPct = Number.isFinite(overlapPctRaw) ? Math.min(Math.max(overlapPctRaw, 0), 100) : 10;
+
   const effectiveAfter = runSincePreset
-    ? resolveSincePreset(runSincePreset, now)
+    ? (() => {
+        const baseMs = sincePresetToMs(runSincePreset);
+        const lookbackMs = Math.round(baseMs * (1 + overlapPct / 100));
+        return timestampToSnowflake(now.getTime() - lookbackMs);
+      })()
     : runAfter;
 
   const startedAt = now.toISOString();

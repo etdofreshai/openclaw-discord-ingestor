@@ -167,7 +167,7 @@ export function isCadencePreset(value: unknown): value is CadencePreset {
 // ── Since preset utilities ──────────────────────────────────────────────────
 
 /** Milliseconds for each preset. Months/year use calendar approximations. */
-function presetToMs(preset: SincePreset): number {
+export function sincePresetToMs(preset: SincePreset): number {
   const MINUTE = 60_000;
   const HOUR = 60 * MINUTE;
   const DAY = 24 * HOUR;
@@ -227,7 +227,7 @@ export function timestampToSnowflake(timestampMs: number): string {
  * @param now    - reference time (defaults to current time); injectable for testing
  */
 export function resolveSincePreset(preset: SincePreset, now: Date = new Date()): string {
-  const cutoffMs = now.getTime() - presetToMs(preset);
+  const cutoffMs = now.getTime() - sincePresetToMs(preset);
   return timestampToSnowflake(cutoffMs);
 }
 
