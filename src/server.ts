@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import http from 'http';
 import express from 'express';
-import { handleDiscordLoginWs } from './lib/login-server.js';
+import loginRouter, { handleDiscordLoginWs } from './lib/login-server.js';
 
 const app = express();
 const server = http.createServer(app);
@@ -9,7 +9,7 @@ const server = http.createServer(app);
 const PORT = parseInt(process.env.LOGIN_SERVER_PORT || '3456', 10);
 
 // Login server routes
-app.use(require('./lib/login-server').default);
+app.use(loginRouter);
 
 // Health check
 app.get('/', (_req, res) => {
