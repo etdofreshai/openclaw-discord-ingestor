@@ -49,7 +49,8 @@ function requireAuth(req: Request, res: Response, next: NextFunction): void {
 
 router.get('/backfill', (_req: Request, res: Response) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(buildBackfillUI());
+  const requiresAuth = Boolean(process.env.UI_TOKEN);
+  res.send(buildBackfillUI(requiresAuth));
 });
 
 // ── API: Start backfill ────────────────────────────────────────────────────────────
@@ -419,7 +420,7 @@ router.get('/api/backfill/events/:runId', requireAuth, (req: Request, res: Respo
 
 // ── HTML UI Template ────────────────────────────────────────────────────────────
 
-function buildBackfillUI(): string {
+function buildBackfillUI(requiresAuth: boolean = false): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -852,7 +853,7 @@ function buildBackfillUI(): string {
   </div>
 
   <script>
-    const REQUIRES_AUTH = false;
+    const REQUIRES_AUTH = ${requiresAuth ? 'true' : 'false'};
     let currentRunId = null;
     let eventSource = null;
     const eventLog = [];
@@ -900,7 +901,9 @@ function buildBackfillUI(): string {
         });
 
         if (res.status === 401) {
-          alert('Unauthorized. Please check your token.');
+          alert('Unauthorized. Your token may be incorrect or expired.\n\nClearing token and reloading...');
+          localStorage.removeItem('backfill-token');
+          location.reload();
           return;
         }
 
@@ -1030,6 +1033,13 @@ function buildBackfillUI(): string {
           body: JSON.stringify({ runId: currentRunId }),
         });
 
+        if (res.status === 401) {
+          alert('Unauthorized. Your token may be incorrect or expired.\n\nClearing token and reloading...');
+          localStorage.removeItem('backfill-token');
+          location.reload();
+          return;
+        }
+
         if (res.ok) {
           const data = await res.json();
           document.getElementById('statusValue').textContent = 'Paused';
@@ -1054,6 +1064,13 @@ function buildBackfillUI(): string {
           method: 'POST',
           headers: Object.assign({ 'Content-Type': 'application/json' }, getHeaders()),
         });
+
+        if (res.status === 401) {
+          alert('Unauthorized. Your token may be incorrect or expired.\n\nClearing token and reloading...');
+          localStorage.removeItem('backfill-token');
+          location.reload();
+          return;
+        }
 
         if (res.ok) {
           document.getElementById('statusValue').textContent = 'Running';
