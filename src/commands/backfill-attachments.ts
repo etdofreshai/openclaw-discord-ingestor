@@ -1,5 +1,8 @@
 import 'dotenv/config';
 import { randomUUID } from 'crypto';
+import { loadSession } from '../lib/session.js';
+import { validateToken } from '../lib/token-validator.js';
+import { syncChannel, fetchChannelMessages } from '../lib/live-sync.js';
 
 type CliOptions = {
   limit?: number;
@@ -7,6 +10,7 @@ type CliOptions = {
   dryRun: boolean;
   resumeFrom?: number;
   verbose: boolean;
+  refetch?: boolean;  // Fetch from Discord instead of memory DB, update in-place
 };
 
 type BackfillStats = {
@@ -24,6 +28,7 @@ function parseArgs(argv: string[]): CliOptions {
     batchSize: 5,
     dryRun: false,
     verbose: false,
+    refetch: false,
   };
 
   for (let i = 2; i < argv.length; i++) {
@@ -33,6 +38,7 @@ function parseArgs(argv: string[]): CliOptions {
     else if (a === '--dry-run') opts.dryRun = true;
     else if (a === '--resume-from') opts.resumeFrom = parseInt(argv[++i] ?? '1', 10);
     else if (a === '--verbose') opts.verbose = true;
+    else if (a === '--refetch') opts.refetch = true;  // Fetch from Discord, update in-place
   }
 
   opts.batchSize = Math.max(1, opts.batchSize);
@@ -309,6 +315,21 @@ export type BackfillProgress = {
   }>;
 };
 
+export type RefetchOptions = {
+  batchSize: number;
+  limit?: number;
+  dryRun: boolean;
+};
+
+export type RefetchStats = {
+  messagesProcessed: number;
+  messagesUpdated: number;
+  attachmentsDownloaded: number;
+  attachmentsIngested: number;
+  attachmentsSkipped: number;
+  errors: Array<{ message: string; attachmentUrl?: string; messageId?: string }>;
+};
+
 export type ProgressCallback = (progress: BackfillProgress) => void;
 
 /**
@@ -486,6 +507,44 @@ export async function backfillAttachments(
     return stats;
   } catch (err: any) {
     throw new Error(`Backfill failed: ${err.message}`);
+  }
+}
+
+/**
+ * Refetch attachments from Discord with fresh URLs, update in-place, download & ingest.
+ * Fetches directly from Discord API (fresh URLs), updates existing rows (no SCD2),
+ * downloads attachments, and ingests them in one pass.
+ */
+export async function refetchAndIngestAttachments(
+  session: any, // DiscordSession
+  apiUrl: string,
+  token: string,
+  options: RefetchOptions
+): Promise<RefetchStats> {
+  console.log('[refetch] Starting refetch mode: Discord → UPDATE in-place → DOWNLOAD → INGEST');
+
+  const stats: RefetchStats = {
+    messagesProcessed: 0,
+    messagesUpdated: 0,
+    attachmentsDownloaded: 0,
+    attachmentsIngested: 0,
+    attachmentsSkipped: 0,
+    errors: [],
+  };
+
+  try {
+    // TODO: Implement core refetch logic
+    // 1. Get list of Discord channels with user
+    // 2. For each channel, fetch messages with attachments
+    // 3. For each message:
+    //    - Download attachments using fresh URLs
+    //    - Ingest them
+    //    - Track progress
+    
+    console.log('[refetch] Refetch mode is being implemented. Stay tuned!');
+    return stats;
+  } catch (err: any) {
+    throw new Error(`Refetch failed: ${err.message}`);
   }
 }
 
