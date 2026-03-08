@@ -901,7 +901,7 @@ function buildBackfillUI(requiresAuth: boolean = false): string {
         });
 
         if (res.status === 401) {
-          alert('Unauthorized. Your token may be incorrect or expired.\n\nClearing token and reloading...');
+          alert('Unauthorized. Your token may be incorrect or expired.\\n\\nClearing token and reloading...');
           localStorage.removeItem('backfill-token');
           location.reload();
           return;
@@ -1034,7 +1034,7 @@ function buildBackfillUI(requiresAuth: boolean = false): string {
         });
 
         if (res.status === 401) {
-          alert('Unauthorized. Your token may be incorrect or expired.\n\nClearing token and reloading...');
+          alert('Unauthorized. Your token may be incorrect or expired.\\n\\nClearing token and reloading...');
           localStorage.removeItem('backfill-token');
           location.reload();
           return;
@@ -1066,7 +1066,7 @@ function buildBackfillUI(requiresAuth: boolean = false): string {
         });
 
         if (res.status === 401) {
-          alert('Unauthorized. Your token may be incorrect or expired.\n\nClearing token and reloading...');
+          alert('Unauthorized. Your token may be incorrect or expired.\\n\\nClearing token and reloading...');
           localStorage.removeItem('backfill-token');
           location.reload();
           return;
