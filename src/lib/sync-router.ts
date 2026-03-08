@@ -606,7 +606,10 @@ tbody tr:hover td{background:rgba(255,255,255,.03)}
     <p class="subtitle">Pull messages from Discord channels into the OpenClaw memory database.</p>
   </div>
   <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
-    <a class="nav-link" href="/discord-login">← Discord Login</a>
+    <div style="display:flex;gap:12px">
+      <a class="nav-link" href="/backfill">📥 Backfill Attachments</a>
+      <a class="nav-link" href="/discord-login">← Discord Login</a>
+    </div>
     <div id="auth-bar" style="display:none">
       <span class="auth-status" id="auth-status-text">🔓 Authenticated</span>
       <button class="btn btn-sm btn-ghost" onclick="clearSavedToken()">Clear Token</button>

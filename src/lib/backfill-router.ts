@@ -757,7 +757,10 @@ function buildBackfillUI(): string {
   </div>
 
   <div class="container">
-    <h1>Discord Ingestor — Attachment Backfill</h1>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+      <h1 style="margin:0">📥 Discord Ingestor — Attachment Backfill</h1>
+      <a href="/sync" style="color:#7289da;font-size:0.85rem;text-decoration:none;padding:6px 12px;border-radius:6px;border:1px solid #7289da;transition:all 0.15s">← Back to Sync</a>
+    </div>
 
     <div id="statusSection" class="status-section" style="display: none;">
       <div class="status-label">STATUS</div>
