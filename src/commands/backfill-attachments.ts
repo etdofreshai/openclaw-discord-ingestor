@@ -520,7 +520,7 @@ export async function refetchAndIngestAttachments(
   apiUrl: string,
   token: string,
   options: RefetchOptions,
-  progressCallback?: (progress: { messagesProcessed: number; downloadedCount: number; ingestedCount: number; lastMessage: string }) => void
+  progressCallback?: (progress: { messagesProcessed: number; downloadedCount: number; ingestedCount: number; lastMessage: string; recentItems?: Array<{ filename: string; messageId: string; status: string; size?: number }> }) => void
 ): Promise<RefetchStats> {
   console.log('[refetch] Starting refetch mode: Discord → UPDATE in-place → DOWNLOAD → INGEST');
 
@@ -537,6 +537,8 @@ export async function refetchAndIngestAttachments(
   if (!session || !discordToken) {
     throw new Error('No Discord session available for refetch. Please log in via /discord-login first.');
   }
+
+  const recentItems: Array<{ filename: string; messageId: string; status: string; size?: number }> = [];
 
   try {
     const { fetchChannelMessages } = await import('../lib/live-sync.js');
@@ -651,6 +653,8 @@ export async function refetchAndIngestAttachments(
                 );
 
                 stats.attachmentsIngested++;
+                recentItems.unshift({ filename: att.filename, messageId: msg.id, status: 'ingested', size: att.size });
+                if (recentItems.length > 10) recentItems.pop();
               } catch (err: any) {
                 const errorMsg = String(err?.message ?? 'Unknown error');
                 console.error(`[refetch] Error ingesting ${att.filename}: ${errorMsg}`);
@@ -660,6 +664,8 @@ export async function refetchAndIngestAttachments(
                   attachmentUrl: att.url,
                   messageId: msg.id,
                 });
+                recentItems.unshift({ filename: att.filename, messageId: msg.id, status: 'error', size: att.size });
+                if (recentItems.length > 10) recentItems.pop();
               }
             }
 
@@ -670,6 +676,7 @@ export async function refetchAndIngestAttachments(
                 downloadedCount: stats.attachmentsDownloaded,
                 ingestedCount: stats.attachmentsIngested,
                 lastMessage: `Processed message ${msg.id} with ${msg.attachments.length} attachments`,
+                recentItems: recentItems.slice(0, 10),
               });
             }
           }

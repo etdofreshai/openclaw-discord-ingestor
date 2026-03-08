@@ -295,6 +295,7 @@ router.post('/api/refetch/start', requireAuth, async (req: Request, res: Respons
           ingestedCount: progress.ingestedCount,
           currentTime: new Date(),
           lastEvent: progress.lastMessage,
+          recentItems: progress.recentItems as any,
         };
         activeRuns.set(run.runId, current);
 
