@@ -853,7 +853,7 @@ function buildBackfillUI(requiresAuth: boolean = false): string {
   </div>
 
   <script>
-    const REQUIRES_AUTH = ${requiresAuth ? 'true' : 'false'};
+    const REQUIRES_AUTH = ${requiresAuth};
     let currentRunId = null;
     let eventSource = null;
     const eventLog = [];
