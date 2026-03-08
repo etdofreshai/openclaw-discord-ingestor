@@ -152,11 +152,13 @@ router.post('/api/backfill/start', requireAuth, async (req: Request, res: Respon
         activeRuns.delete(run.runId);
       })
       .catch(async (err) => {
+        console.error(`[backfill] Error in backfill run ${run.runId}:`, err);
+        
         // Mark as error
         await updateBackfillRun(run.runId, {
           status: 'error',
           completedAt: new Date().toISOString(),
-          error: err.message,
+          error: err.message || String(err),
         });
 
         // Broadcast error
@@ -165,7 +167,7 @@ router.post('/api/backfill/start', requireAuth, async (req: Request, res: Respon
           const msg = 'event: error\ndata: ' + JSON.stringify({
             runId: run.runId,
             status: 'error',
-            message: err.message,
+            message: err.message || String(err),
           }) + '\n\n';
           clients.forEach(client => {
             client.write(msg);
