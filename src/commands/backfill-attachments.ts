@@ -178,9 +178,8 @@ async function ingestAttachment(
     `[backfill-ingest] Ingesting ${attachmentMeta.filename} (${attachmentBuffer.length} bytes) ` +
     `for message ${messageData.external_id}`
   );
-  const form = new FormData();
 
-  // Message payload
+  // Message payload (reuse across retries)
   const messagePayload = {
     source: 'discord',
     sender: messageData.sender,
@@ -191,16 +190,7 @@ async function ingestAttachment(
     metadata: messageData.metadata,
   };
 
-  form.append('message', JSON.stringify(messagePayload));
-
-  // Attachment file
-  const stream = Readable.from(attachmentBuffer);
-  form.append('files', stream, {
-    filename: attachmentMeta.filename,
-    contentType: attachmentMeta.content_type || 'application/octet-stream',
-  });
-
-  // Attachment metadata
+  // Attachment metadata (reuse across retries)
   const attachmentsMeta = [
     {
       original_file_name: attachmentMeta.filename,
@@ -208,10 +198,17 @@ async function ingestAttachment(
     },
   ];
 
-  form.append('attachments_meta', JSON.stringify(attachmentsMeta));
-
   for (let attempt = 0; attempt <= 3; attempt++) {
     try {
+      // Create fresh FormData for each attempt (don't reuse across retries)
+      const form = new FormData();
+      form.append('message', JSON.stringify(messagePayload));
+      form.append('files', attachmentBuffer, {
+        filename: attachmentMeta.filename,
+        contentType: attachmentMeta.content_type || 'application/octet-stream',
+      });
+      form.append('attachments_meta', JSON.stringify(attachmentsMeta));
+
       const res = await fetch(`${apiUrl}/api/messages/ingest`, {
         method: 'POST',
         headers: {
