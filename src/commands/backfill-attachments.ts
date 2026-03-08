@@ -519,7 +519,8 @@ export async function refetchAndIngestAttachments(
   session: any, // DiscordSession
   apiUrl: string,
   token: string,
-  options: RefetchOptions
+  options: RefetchOptions,
+  progressCallback?: (progress: { messagesProcessed: number; downloadedCount: number; ingestedCount: number; lastMessage: string }) => void
 ): Promise<RefetchStats> {
   console.log('[refetch] Starting refetch mode: Discord → UPDATE in-place → DOWNLOAD → INGEST');
 
@@ -532,16 +533,152 @@ export async function refetchAndIngestAttachments(
     errors: [],
   };
 
+  if (!session || !session.rest_token) {
+    throw new Error('No Discord session available for refetch. Please log in via /discord-login first.');
+  }
+
   try {
-    // TODO: Implement core refetch logic
-    // 1. Get list of Discord channels with user
-    // 2. For each channel, fetch messages with attachments
-    // 3. For each message:
-    //    - Download attachments using fresh URLs
-    //    - Ingest them
-    //    - Track progress
+    const { fetchChannelMessages } = await import('../lib/live-sync.js');
     
-    console.log('[refetch] Refetch mode is being implemented. Stay tuned!');
+    // Get the user's guilds to find channels with attachments
+    const guildsReq = await fetch('https://discord.com/api/v10/users/@me/guilds', {
+      headers: { Authorization: `Bearer ${session.rest_token}` },
+    });
+    
+    if (!guildsReq.ok) {
+      throw new Error(`Failed to fetch guilds: ${guildsReq.status}`);
+    }
+
+    const guilds = await guildsReq.json() as Array<{ id: string; name: string }>;
+    console.log(`[refetch] Found ${guilds.length} guilds`);
+
+    let messagesWithAttachmentsCount = 0;
+    const maxMessages = options.limit ?? Infinity;
+
+    // Iterate through guilds and channels
+    for (const guild of guilds) {
+      if (stats.messagesProcessed >= maxMessages) break;
+
+      console.log(`[refetch] Guild: ${guild.name} (${guild.id})`);
+
+      // Get channels in this guild
+      const channelsReq = await fetch(`https://discord.com/api/v10/guilds/${guild.id}/channels`, {
+        headers: { Authorization: `Bearer ${session.rest_token}` },
+      });
+
+      if (!channelsReq.ok) continue;
+      
+      const channels = await channelsReq.json() as Array<{ id: string; name: string; type: number }>;
+
+      // Type 0 = text channel
+      for (const channel of channels.filter((c: any) => c.type === 0)) {
+        if (stats.messagesProcessed >= maxMessages) break;
+
+        console.log(`[refetch]   Channel: #${channel.name}`);
+
+        // Fetch messages from this channel
+        let hasMore = true;
+        let before: string | undefined;
+        let pageCount = 0;
+
+        while (hasMore && stats.messagesProcessed < maxMessages) {
+          pageCount++;
+          const messagesReq = await fetch(
+            `https://discord.com/api/v10/channels/${channel.id}/messages?limit=100${before ? `&before=${before}` : ''}`,
+            { headers: { Authorization: `Bearer ${session.rest_token}` } }
+          );
+
+          if (!messagesReq.ok) break;
+
+          const messages = await messagesReq.json() as Array<any>;
+          if (messages.length === 0) break;
+
+          hasMore = messages.length === 100;
+          before = messages[messages.length - 1]?.id;
+
+          // Process messages with attachments
+          for (const msg of messages) {
+            if (!Array.isArray(msg.attachments) || msg.attachments.length === 0) continue;
+            if (stats.messagesProcessed >= maxMessages) break;
+
+            stats.messagesProcessed++;
+            messagesWithAttachmentsCount++;
+
+            console.log(`[refetch] Message ${msg.id}: ${msg.attachments.length} attachments`);
+
+            // Process each attachment
+            for (const att of msg.attachments) {
+              if (options.dryRun) {
+                console.log(`[refetch-dry-run] Would download & ingest: ${att.filename}`);
+                stats.attachmentsSkipped++;
+                continue;
+              }
+
+              try {
+                // Download attachment with fresh URL
+                const attBuffer = await downloadAttachment(att.url, att.filename);
+                stats.attachmentsDownloaded++;
+
+                // Ingest into memory DB
+                await ingestAttachment(
+                  apiUrl,
+                  token,
+                  {
+                    id: msg.id,
+                    external_id: msg.id,
+                    sender: msg.author?.username ?? 'unknown',
+                    recipient: `discord-channel:${channel.id}`,
+                    content: msg.content ?? '[message with attachments]',
+                    timestamp: msg.timestamp,
+                    metadata: {
+                      channelId: channel.id,
+                      author: msg.author,
+                      attachments: msg.attachments,
+                      embeds: msg.embeds ?? [],
+                      mentions: msg.mentions ?? [],
+                    },
+                    record_id: msg.id, // Placeholder for in-place update
+                  },
+                  attBuffer,
+                  {
+                    id: att.id,
+                    filename: att.filename,
+                    size: att.size,
+                    content_type: att.content_type || 'application/octet-stream',
+                    created_at_source: msg.timestamp,
+                  }
+                );
+
+                stats.attachmentsIngested++;
+              } catch (err: any) {
+                const errorMsg = String(err?.message ?? 'Unknown error');
+                console.error(`[refetch] Error ingesting ${att.filename}: ${errorMsg}`);
+                stats.attachmentsSkipped++;
+                stats.errors.push({
+                  message: errorMsg,
+                  attachmentUrl: att.url,
+                  messageId: msg.id,
+                });
+              }
+            }
+
+            // Progress callback
+            if (progressCallback) {
+              progressCallback({
+                messagesProcessed: stats.messagesProcessed,
+                downloadedCount: stats.attachmentsDownloaded,
+                ingestedCount: stats.attachmentsIngested,
+                lastMessage: `Processed message ${msg.id} with ${msg.attachments.length} attachments`,
+              });
+            }
+          }
+        }
+
+        console.log(`[refetch]   Channel #${channel.name}: ${pageCount} pages fetched`);
+      }
+    }
+
+    console.log(`[refetch] Complete: ${stats.messagesProcessed} messages with attachments, ${stats.attachmentsIngested} ingested`);
     return stats;
   } catch (err: any) {
     throw new Error(`Refetch failed: ${err.message}`);
@@ -565,39 +702,87 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  if (readToken === writeToken) {
-    console.log('[backfill] Using MEMORY_DATABASE_API_TOKEN for both read and write');
-  } else {
-    console.log('[backfill] Using separate read and write tokens');
-  }
-
   try {
-    const stats = await backfillAttachments(
-      {
-        batchSize: opts.batchSize,
-        limit: opts.limit,
-        dryRun: opts.dryRun,
-        resumeFrom: opts.resumeFrom ?? 1,
-      },
-      (progress) => {
-        if (opts.verbose) {
-          console.log(
-            `[backfill] Page ${progress.page}/${progress.totalPages}: ` +
-            `${progress.downloadedCount} downloaded, ${progress.ingestedCount} ingested`
-          );
-        }
+    if (opts.refetch) {
+      // Refetch mode: fetch from Discord API, update in-place, download & ingest
+      console.log('[refetch] Refetch mode: Discord API → UPDATE in-place → DOWNLOAD → INGEST');
+      
+      const session = await loadSession();
+      if (!session) {
+        console.error('[refetch] No Discord session found. Please log in via /discord-login first.');
+        process.exit(1);
       }
-    );
+      
+      const user = await validateToken(session);
+      if (!user) {
+        console.error('[refetch] Discord token validation failed. Please log in again.');
+        process.exit(1);
+      }
+      
+      console.log(`[refetch] Authenticated as ${user.username}#${user.discriminator}`);
+      
+      const stats = await refetchAndIngestAttachments(
+        session,
+        apiUrl,
+        writeToken,
+        {
+          batchSize: opts.batchSize,
+          limit: opts.limit,
+          dryRun: opts.dryRun,
+        },
+        (progress) => {
+          if (opts.verbose) {
+            console.log(
+              `[refetch] ${progress.messagesProcessed} messages, ` +
+              `${progress.downloadedCount} downloaded, ${progress.ingestedCount} ingested`
+            );
+          }
+        }
+      );
 
-    console.log('');
-    console.log('[backfill] Backfill complete!');
-    console.log(JSON.stringify(stats, null, 2));
+      console.log('');
+      console.log('[refetch] Refetch complete!');
+      console.log(JSON.stringify(stats, null, 2));
 
-    if (stats.errors.length > 0) {
-      process.exit(1);
+      if (stats.errors.length > 0) {
+        console.warn(`[refetch] ${stats.errors.length} errors encountered`);
+        process.exit(1);
+      }
+    } else {
+      // Original backfill mode: read from memory DB API
+      if (readToken === writeToken) {
+        console.log('[backfill] Using MEMORY_DATABASE_API_TOKEN for both read and write');
+      } else {
+        console.log('[backfill] Using separate read and write tokens');
+      }
+
+      const stats = await backfillAttachments(
+        {
+          batchSize: opts.batchSize,
+          limit: opts.limit,
+          dryRun: opts.dryRun,
+          resumeFrom: opts.resumeFrom ?? 1,
+        },
+        (progress) => {
+          if (opts.verbose) {
+            console.log(
+              `[backfill] Page ${progress.page}/${progress.totalPages}: ` +
+              `${progress.downloadedCount} downloaded, ${progress.ingestedCount} ingested`
+            );
+          }
+        }
+      );
+
+      console.log('');
+      console.log('[backfill] Backfill complete!');
+      console.log(JSON.stringify(stats, null, 2));
+
+      if (stats.errors.length > 0) {
+        process.exit(1);
+      }
     }
   } catch (err: any) {
-    console.error('[backfill] Fatal error:', err.message);
+    console.error('[backfill/refetch] Fatal error:', err.message);
     process.exit(1);
   }
 }

@@ -1,5 +1,13 @@
 import { Router, Request, Response, NextFunction } from 'express';
-import { backfillAttachments, BackfillProgress, BackfillOptions } from '../commands/backfill-attachments.js';
+import {
+  backfillAttachments,
+  refetchAndIngestAttachments,
+  BackfillProgress,
+  BackfillOptions,
+  type RefetchOptions,
+} from '../commands/backfill-attachments.js';
+import { loadSession } from './session.js';
+import { validateToken } from './token-validator.js';
 import {
   loadBackfillRuns,
   createBackfillRun,
@@ -179,6 +187,161 @@ router.post('/api/backfill/start', requireAuth, async (req: Request, res: Respon
       });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ── API: Start refetch (Discord fetch + in-place UPDATE + download + ingest) ────────────────
+
+router.post('/api/refetch/start', requireAuth, async (req: Request, res: Response) => {
+  const { batchSize = 10, limit, dryRun = false } = req.body as {
+    batchSize?: number;
+    limit?: number;
+    dryRun?: boolean;
+  };
+
+  // Load Discord session
+  const session = await loadSession();
+  if (!session) {
+    res.status(400).json({ error: 'No Discord session found. Please log in via /discord-login first.' });
+    return;
+  }
+
+  const user = await validateToken(session);
+  if (!user) {
+    res.status(400).json({ error: 'Discord token validation failed. Please log in again.' });
+    return;
+  }
+
+  // Check if there's already an active refetch
+  const existingActive = await getActiveBackfillRun();
+  if (existingActive) {
+    res.status(409).json({
+      error: 'A refetch is already running.',
+      runId: existingActive.runId,
+    });
+    return;
+  }
+
+  const options: RefetchOptions = {
+    batchSize: Math.max(1, batchSize),
+    limit,
+    dryRun,
+  };
+
+  try {
+    const run = await createBackfillRun({ ...options, resumeFrom: 1 });
+
+    // Initialize active run tracking
+    activeRuns.set(run.runId, {
+      progress: {
+        runId: run.runId,
+        page: 1,
+        totalPages: 1, // Unknown for refetch
+        messagesProcessed: 0,
+        downloadedCount: 0,
+        ingestedCount: 0,
+        skippedCount: 0,
+        errorCount: 0,
+        startTime: new Date(),
+        currentTime: new Date(),
+      },
+    });
+
+    sseClients.set(run.runId, new Set());
+
+    res.json({
+      runId: run.runId,
+      status: 'running',
+      startedAt: run.startedAt,
+      progress: activeRuns.get(run.runId)?.progress,
+    });
+
+    // Start refetch in background (don't await)
+    const apiUrl = (process.env.MEMORY_DATABASE_API_URL ?? '').replace(/\/+$/, '');
+    const writeToken = process.env.MEMORY_DATABASE_API_WRITE_TOKEN ??
+      process.env.MEMORY_DATABASE_API_TOKEN ?? '';
+
+    refetchAndIngestAttachments(session, apiUrl, writeToken, options, (progress) => {
+      const current = activeRuns.get(run.runId);
+      if (current) {
+        current.progress = {
+          ...current.progress,
+          messagesProcessed: progress.messagesProcessed,
+          downloadedCount: progress.downloadedCount,
+          ingestedCount: progress.ingestedCount,
+          currentTime: new Date(),
+          lastEvent: progress.lastMessage,
+        };
+        activeRuns.set(run.runId, current);
+
+        // Broadcast to all SSE clients
+        const clients = sseClients.get(run.runId);
+        if (clients) {
+          const msg = 'data: ' + JSON.stringify(current.progress) + '\n\n';
+          clients.forEach(client => {
+            client.write(msg);
+          });
+        }
+      }
+    })
+      .then(async (stats) => {
+        // Mark as complete
+        await updateBackfillRun(run.runId, {
+          status: 'complete',
+          completedAt: new Date().toISOString(),
+          stats: {
+            totalMessages: stats.messagesProcessed,
+            messagesWithAttachments: stats.messagesUpdated,
+            downloadedAttachments: stats.attachmentsDownloaded,
+            ingestedAttachments: stats.attachmentsIngested,
+            skipped: stats.attachmentsSkipped,
+            errors: stats.errors.length,
+          },
+        });
+
+        // Broadcast completion
+        const clients = sseClients.get(run.runId);
+        if (clients) {
+          const msg = 'event: complete\ndata: ' + JSON.stringify({
+            runId: run.runId,
+            status: 'complete',
+          }) + '\n\n';
+          clients.forEach(client => {
+            client.write(msg);
+            client.end();
+          });
+          sseClients.delete(run.runId);
+        }
+        activeRuns.delete(run.runId);
+      })
+      .catch(async (err) => {
+        console.error(`[refetch] Error in refetch run ${run.runId}:`, err);
+        
+        // Mark as error
+        await updateBackfillRun(run.runId, {
+          status: 'error',
+          completedAt: new Date().toISOString(),
+          error: err.message || String(err),
+        });
+
+        // Broadcast error
+        const clients = sseClients.get(run.runId);
+        if (clients) {
+          const msg = 'event: error\ndata: ' + JSON.stringify({
+            runId: run.runId,
+            status: 'error',
+            message: err.message || String(err),
+          }) + '\n\n';
+          clients.forEach(client => {
+            client.write(msg);
+            client.end();
+          });
+          sseClients.delete(run.runId);
+        }
+        activeRuns.delete(run.runId);
+      });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to start refetch' });
   }
 });
 
@@ -428,7 +591,7 @@ function buildBackfillUI(requiresAuth: boolean = false): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Discord Ingestor — Attachment Backfill</title>
+  <title>Discord Ingestor — Attachment Refetch</title>
   <style>
     * { box-sizing: border-box; }
     body {
@@ -913,10 +1076,10 @@ function buildBackfillUI(requiresAuth: boolean = false): string {
       const dryRun = document.getElementById('dryRun').checked;
 
       try {
-        const res = await fetch('/api/backfill/start', {
+        const res = await fetch('/api/refetch/start', {
           method: 'POST',
           headers: Object.assign({ 'Content-Type': 'application/json' }, getHeaders()),
-          body: JSON.stringify({ batchSize, limit, resumeFrom, dryRun }),
+          body: JSON.stringify({ batchSize, limit, dryRun }),
         });
 
         if (res.status === 401) {
