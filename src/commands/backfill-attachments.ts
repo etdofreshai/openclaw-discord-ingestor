@@ -1,6 +1,4 @@
 import 'dotenv/config';
-import FormData from 'form-data';
-import { Readable } from 'stream';
 import { randomUUID } from 'crypto';
 
 type CliOptions = {
@@ -201,21 +199,20 @@ async function ingestAttachment(
   for (let attempt = 0; attempt <= 3; attempt++) {
     try {
       // Create fresh FormData for each attempt (don't reuse across retries)
+      // Use native FormData API (available in Node 18.12+)
       const form = new FormData();
       form.append('message', JSON.stringify(messagePayload));
-      form.append('files', attachmentBuffer, {
-        filename: attachmentMeta.filename,
-        contentType: attachmentMeta.content_type || 'application/octet-stream',
-      });
+      form.append('files', new Blob([new Uint8Array(attachmentBuffer)], {
+        type: attachmentMeta.content_type || 'application/octet-stream',
+      }), attachmentMeta.filename);
       form.append('attachments_meta', JSON.stringify(attachmentsMeta));
 
       const res = await fetch(`${apiUrl}/api/messages/ingest`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
-          ...form.getHeaders(),
         },
-        body: form as any,
+        body: form,
       });
 
       if (res.status === 429) {
