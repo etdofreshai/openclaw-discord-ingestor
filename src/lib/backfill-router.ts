@@ -853,7 +853,7 @@ function buildBackfillUI(requiresAuth: boolean = false): string {
       </table>
     </div>
 
-    <div class="runs-section" id="recentItemsContainer" style="display: none; margin-top: 24px;">
+    <div class="runs-section" id="recentItemsContainer" style="margin-top: 24px;">
       <div class="runs-header">Last 10 Items Backfilled</div>
       <table>
         <thead>
@@ -1034,15 +1034,13 @@ function buildBackfillUI(requiresAuth: boolean = false): string {
     }
 
     function updateRecentItems(items) {
-      const container = document.getElementById('recentItemsContainer');
       const tbody = document.getElementById('recentItemsTable');
       
       if (items.length === 0) {
-        container.style.display = 'none';
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: #9ca3af;">No items yet</td></tr>';
         return;
       }
       
-      container.style.display = 'block';
       tbody.innerHTML = items.map(item => {
         const sizeStr = item.size ? (item.size / 1024 / 1024).toFixed(2) + ' MB' : '—';
         const statusColor = item.status === 'ingested' ? '#22c55e' : item.status === 'downloaded' ? '#3b82f6' : item.status === 'error' ? '#ef4444' : '#f59e0b';
