@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import FormData from 'form-data';
 import { Readable } from 'stream';
+import { randomUUID } from 'crypto';
 
 type CliOptions = {
   limit?: number;
@@ -291,7 +292,7 @@ export async function backfillAttachments(
     errors: [],
   };
 
-  const runId = require('crypto').randomUUID();
+  const runId = randomUUID();
   const startPage = options.resumeFrom ?? 1;
   const startTime = new Date();
 
