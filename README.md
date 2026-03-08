@@ -635,6 +635,86 @@ Options for `npm run sync`:
 | `--after <id>` | Fetch messages after this ID |
 | `--verbose` | Print progress |
 
+### 3. Attachment Backfill
+
+Backfill attachments from all existing Discord messages in the memory database. Downloads actual attachment files from Discord CDN and re-ingests them via the memory DB ingest API.
+
+**Requires:**
+- `MEMORY_DATABASE_API_URL` - Memory DB API base URL
+- `MEMORY_DATABASE_API_TOKEN` - Token for reading messages (required)
+- `MEMORY_DATABASE_API_WRITE_TOKEN` (optional) - Token for writing attachments; defaults to `MEMORY_DATABASE_API_TOKEN` if not set
+
+**Token Permissions:**
+The write token must have `permissions='admin'` or `permissions='write'` with `write_sources` including `'discord'`. If you encounter `403 Insufficient permissions`, ensure:
+- The token is active and not rate-limited
+- For `write` tokens: `write_sources` array includes `'discord'`
+- For `admin` tokens: No source restrictions apply
+- Recommended: Use an admin token for backfill operations
+
+**Basic usage (dry-run first):**
+
+```bash
+# Preview what would be backfilled
+npm run backfill-attachments -- --limit 100 --dry-run --verbose
+
+# Start actual backfill with concurrent downloads (batch-size=5)
+MEMORY_DATABASE_API_URL="http://dokploy-memory-database-api-lxfp0i:3000" \
+MEMORY_DATABASE_API_TOKEN="your-token" \
+npm run backfill-attachments -- --limit 1000 --batch-size 5 --verbose
+
+# Resume from a specific page (if interrupted)
+npm run backfill-attachments -- --resume-from 50 --batch-size 10
+```
+
+Options for `npm run backfill-attachments`:
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--limit N` | Max messages to process | all (104,697) |
+| `--batch-size N` | Concurrent attachment downloads per message | 5 |
+| `--dry-run` | Preview without writing to API | false |
+| `--resume-from <page>` | Start from specific page (1–1047) | 1 |
+| `--verbose` | Print detailed progress | false |
+
+**How it works:**
+
+1. **Query phase:** Paginates through Discord messages (100 per page) from memory DB API
+2. **Filter:** Only processes messages with `metadata.attachments`
+3. **Download phase:** Downloads each attachment file from Discord CDN (with 429 rate-limit retry)
+4. **Ingest phase:** Posts attachment + metadata to `/api/messages/ingest` endpoint
+5. **Error handling:** Tracks errors per attachment; continues on transient failures (429, 5xx)
+
+**Expected runtime:**
+
+- **Dry-run (50 messages):** ~10–30 seconds (depends on attachment sizes and network)
+- **Full backfill (104,697 messages):** ~2–6 hours (with 5 concurrent downloads)
+
+**Output (JSON):**
+
+```json
+{
+  "messagesProcessed": 1000,
+  "messagesWithAttachments": 45,
+  "totalAttachmentsFetched": 67,
+  "attachmentsDownloaded": 66,
+  "attachmentsIngested": 66,
+  "attachmentsSkipped": 1,
+  "errors": [
+    {
+      "message": "HTTP 404: Not Found",
+      "attachmentUrl": "https://...",
+      "messageId": "123456789"
+    }
+  ]
+}
+```
+
+**Recovery strategy:**
+
+- Some Discord CDN files may expire (404 errors) — these are safely skipped
+- Use `--resume-from <page>` to continue from the last successful page if interrupted
+- Ingest is idempotent — re-running the backfill will skip already-ingested attachments (via SHA256 deduplication in memory DB)
+
 ---
 
 ## Architecture
@@ -644,13 +724,15 @@ src/
 ├── index.ts                  # JSON import CLI
 ├── server.ts                 # Express server entry point
 ├── commands/
-│   └── live-sync.ts          # Live sync CLI command
+│   ├── live-sync.ts          # Live sync CLI command
+│   └── backfill-attachments.ts # Attachment backfill CLI command
 └── lib/
     ├── browser.ts            # Chromium CDP helpers
     ├── session.ts            # Discord session persistence (.data/chrome-profile/)
     ├── token-validator.ts    # Discord API token validation
     ├── login-server.ts       # Login UI + WebSocket screencast + CDP token capture
     ├── live-sync.ts          # Discord API fetch + DB upsert (returns SyncResult)
+    ├── api-writer.ts         # Memory DB API write with retry/backoff
     ├── job-store.ts          # Job CRUD + .data/jobs/jobs.json persistence
     ├── run-store.ts          # Run log append/query + .data/runs/runs.json persistence
     ├── scheduler.ts          # Boundary-aligned scheduler (rehydrates on start; enqueues via queue)

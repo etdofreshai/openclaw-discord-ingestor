@@ -6,6 +6,7 @@
   "scripts": {
     "import": "tsx src/index.ts",
     "sync": "tsx src/commands/live-sync.ts",
+    "backfill-attachments": "tsx src/commands/backfill-attachments.ts",
     "server": "tsx src/server.ts",
     "typecheck": "tsc --noEmit"
   },
@@ -16,6 +17,7 @@
     "@types/ws": "^8.18.1",
     "dotenv": "^16.4.5",
     "express": "^5.2.1",
+    "form-data": "^4.0.5",
     "pg": "^8.13.1",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",
