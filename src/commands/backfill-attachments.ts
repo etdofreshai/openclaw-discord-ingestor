@@ -207,19 +207,29 @@ async function ingestAttachment(
       // Create fresh FormData for each attempt (don't reuse across retries)
       // Use native FormData API (available in Node 18.12+)
       const form = new FormData();
+      
+      console.log(`[backfill-ingest] Building FormData for ${attachmentMeta.filename}`);
+      console.log(`[backfill-ingest] Message payload: ${JSON.stringify(messagePayload)}`);
+      console.log(`[backfill-ingest] Attachments meta: ${JSON.stringify(attachmentsMeta)}`);
+      
       form.append('message', JSON.stringify(messagePayload));
       form.append('files', new Blob([new Uint8Array(attachmentBuffer)], {
         type: attachmentMeta.content_type || 'application/octet-stream',
       }), attachmentMeta.filename);
       form.append('attachments_meta', JSON.stringify(attachmentsMeta));
 
-      const res = await fetch(`${apiUrl}/api/messages/ingest`, {
+      const url = `${apiUrl}/api/messages/ingest`;
+      console.log(`[backfill-ingest] POSTing to ${url} with Authorization header`);
+      
+      const res = await fetch(url, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
         },
         body: form,
       });
+
+      console.log(`[backfill-ingest] Response status: ${res.status}`);
 
       if (res.status === 429) {
         const retryAfter = parseFloat(res.headers.get('retry-after') ?? '5');
