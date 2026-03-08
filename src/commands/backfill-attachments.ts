@@ -213,7 +213,7 @@ async function ingestAttachment(
           Authorization: `Bearer ${token}`,
           ...form.getHeaders(),
         },
-        body: form,
+        body: form as any,
       });
 
       if (res.status === 429) {
@@ -325,7 +325,11 @@ async function main(): Promise<void> {
             try {
               if (opts.verbose) console.log(`[backfill]   Downloading: ${att.filename} (${att.size} bytes)`);
 
-              const fileBuffer = await downloadAttachment(att.url || att.proxy_url, att.filename);
+              const url = att.url || att.proxy_url;
+              if (!url) {
+                throw new Error('Attachment has no url or proxy_url');
+              }
+              const fileBuffer = await downloadAttachment(url, att.filename);
               stats.attachmentsDownloaded++;
 
               if (opts.dryRun) {
@@ -344,7 +348,7 @@ async function main(): Promise<void> {
                   id: att.id,
                   filename: att.filename,
                   size: att.size,
-                  content_type: att.content_type,
+                  content_type: att.content_type || 'application/octet-stream',
                 }
               );
               stats.attachmentsIngested++;
