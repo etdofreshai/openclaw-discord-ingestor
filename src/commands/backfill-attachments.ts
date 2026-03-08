@@ -238,29 +238,47 @@ async function ingestAttachment(
   throw new Error('Failed to ingest attachment after retries');
 }
 
-/**
- * Main backfill routine.
- */
-async function main(): Promise<void> {
-  const opts = parseArgs(process.argv);
+export type BackfillOptions = {
+  batchSize: number;
+  limit?: number;
+  dryRun: boolean;
+  resumeFrom: number;
+};
 
+export type BackfillProgress = {
+  runId: string;
+  page: number;
+  totalPages: number;
+  messagesProcessed: number;
+  downloadedCount: number;
+  ingestedCount: number;
+  skippedCount: number;
+  errorCount: number;
+  lastEvent?: string;
+  startTime: Date;
+  currentTime: Date;
+  estimatedRemaining?: number;
+};
+
+export type ProgressCallback = (progress: BackfillProgress) => void;
+
+/**
+ * Main backfill routine - exported for API integration.
+ */
+export async function backfillAttachments(
+  options: BackfillOptions,
+  progressCallback?: ProgressCallback
+): Promise<BackfillStats> {
   // Validate env vars
   const apiUrl = (process.env.MEMORY_DATABASE_API_URL ?? '').replace(/\/+$/, '');
   const readToken = process.env.MEMORY_DATABASE_API_TOKEN ?? '';
   const writeToken = process.env.MEMORY_DATABASE_API_WRITE_TOKEN ?? readToken;
 
   if (!apiUrl || !readToken) {
-    console.error(
+    throw new Error(
       'Missing environment variables: ' +
       'MEMORY_DATABASE_API_URL and MEMORY_DATABASE_API_TOKEN are required'
     );
-    process.exit(1);
-  }
-
-  if (readToken === writeToken) {
-    console.log('[backfill] Using MEMORY_DATABASE_API_TOKEN for both read and write');
-  } else {
-    console.log('[backfill] Using separate read and write tokens');
   }
 
   const stats: BackfillStats = {
@@ -273,30 +291,20 @@ async function main(): Promise<void> {
     errors: [],
   };
 
-  const startPage = opts.resumeFrom ?? 1;
+  const runId = require('crypto').randomUUID();
+  const startPage = options.resumeFrom ?? 1;
+  const startTime = new Date();
 
   try {
     // Fetch first page to get total pages
-    if (opts.verbose) console.log('[backfill] Fetching initial page to determine total pages...');
     let firstPage = await fetchDiscordMessagesWithAttachments(apiUrl, readToken, 1, 100);
 
     const totalPages = firstPage.totalPages;
-    const maxMessages = opts.limit ?? firstPage.total;
-
-    console.log(`[backfill] Starting backfill of Discord attachments`);
-    console.log(`[backfill]   Total Discord messages: ${firstPage.total}`);
-    console.log(`[backfill]   Total pages: ${totalPages}`);
-    console.log(`[backfill]   Processing: ${maxMessages} messages (limit: ${opts.limit ? 'specified' : 'all'})`);
-    console.log(`[backfill]   Starting page: ${startPage}`);
-    console.log(`[backfill]   Batch size (concurrent downloads): ${opts.batchSize}`);
-    console.log(`[backfill]   Dry run: ${opts.dryRun}`);
-    console.log('');
+    const maxMessages = options.limit ?? firstPage.total;
 
     let messagesProcessedTotal = 0;
 
     for (let page = startPage; page <= totalPages && messagesProcessedTotal < maxMessages; page++) {
-      if (opts.verbose) console.log(`[backfill] Fetching page ${page}/${totalPages}...`);
-
       const pageData = await fetchDiscordMessagesWithAttachments(apiUrl, readToken, page, 100);
 
       for (const message of pageData.messages) {
@@ -311,20 +319,11 @@ async function main(): Promise<void> {
         stats.messagesWithAttachments++;
         stats.totalAttachmentsFetched += attachments.length;
 
-        if (opts.verbose) {
-          console.log(
-            `[backfill] Message ${message.external_id}: ` +
-            `${attachments.length} attachment(s)`
-          );
-        }
-
         // Process attachments in batches
-        for (let i = 0; i < attachments.length; i += opts.batchSize) {
-          const batch = attachments.slice(i, i + opts.batchSize);
+        for (let i = 0; i < attachments.length; i += options.batchSize) {
+          const batch = attachments.slice(i, i + options.batchSize);
           const batchPromises = batch.map(async att => {
             try {
-              if (opts.verbose) console.log(`[backfill]   Downloading: ${att.filename} (${att.size} bytes)`);
-
               const url = att.url || att.proxy_url;
               if (!url) {
                 throw new Error('Attachment has no url or proxy_url');
@@ -332,12 +331,9 @@ async function main(): Promise<void> {
               const fileBuffer = await downloadAttachment(url, att.filename);
               stats.attachmentsDownloaded++;
 
-              if (opts.dryRun) {
-                if (opts.verbose) console.log(`[backfill]   [DRY RUN] Would ingest: ${att.filename}`);
+              if (options.dryRun) {
                 return;
               }
-
-              if (opts.verbose) console.log(`[backfill]   Ingesting: ${att.filename}`);
 
               await ingestAttachment(
                 apiUrl,
@@ -359,9 +355,6 @@ async function main(): Promise<void> {
                 attachmentUrl: att.url,
                 messageId: message.external_id,
               });
-              console.error(
-                `[backfill] Error processing ${att.filename} in message ${message.external_id}: ${err.message}`
-              );
             }
           });
 
@@ -369,13 +362,77 @@ async function main(): Promise<void> {
         }
       }
 
-      console.log(
-        `[backfill] Page ${page} complete. Progress: ` +
-        `${stats.messagesProcessed} messages, ` +
-        `${stats.attachmentsDownloaded} downloaded, ` +
-        `${stats.attachmentsIngested} ingested`
-      );
+      // Emit progress
+      const now = new Date();
+      const elapsed = now.getTime() - startTime.getTime();
+      const pagesPerMs = page / elapsed;
+      const remainingPages = totalPages - page;
+      const estimatedRemaining = remainingPages / pagesPerMs;
+
+      if (progressCallback) {
+        progressCallback({
+          runId,
+          page,
+          totalPages,
+          messagesProcessed: stats.messagesProcessed,
+          downloadedCount: stats.attachmentsDownloaded,
+          ingestedCount: stats.attachmentsIngested,
+          skippedCount: stats.attachmentsSkipped,
+          errorCount: stats.errors.length,
+          lastEvent: `Page ${page} complete: ${stats.attachmentsDownloaded} downloaded, ${stats.attachmentsIngested} ingested`,
+          startTime,
+          currentTime: now,
+          estimatedRemaining: remainingPages > 0 ? estimatedRemaining : 0,
+        });
+      }
     }
+
+    return stats;
+  } catch (err: any) {
+    throw new Error(`Backfill failed: ${err.message}`);
+  }
+}
+
+/**
+ * CLI entry point for backwards compatibility.
+ */
+async function main(): Promise<void> {
+  const opts = parseArgs(process.argv);
+  const apiUrl = (process.env.MEMORY_DATABASE_API_URL ?? '').replace(/\/+$/, '');
+  const readToken = process.env.MEMORY_DATABASE_API_TOKEN ?? '';
+  const writeToken = process.env.MEMORY_DATABASE_API_WRITE_TOKEN ?? readToken;
+
+  if (!apiUrl || !readToken) {
+    console.error(
+      'Missing environment variables: ' +
+      'MEMORY_DATABASE_API_URL and MEMORY_DATABASE_API_TOKEN are required'
+    );
+    process.exit(1);
+  }
+
+  if (readToken === writeToken) {
+    console.log('[backfill] Using MEMORY_DATABASE_API_TOKEN for both read and write');
+  } else {
+    console.log('[backfill] Using separate read and write tokens');
+  }
+
+  try {
+    const stats = await backfillAttachments(
+      {
+        batchSize: opts.batchSize,
+        limit: opts.limit,
+        dryRun: opts.dryRun,
+        resumeFrom: opts.resumeFrom ?? 1,
+      },
+      (progress) => {
+        if (opts.verbose) {
+          console.log(
+            `[backfill] Page ${progress.page}/${progress.totalPages}: ` +
+            `${progress.downloadedCount} downloaded, ${progress.ingestedCount} ingested`
+          );
+        }
+      }
+    );
 
     console.log('');
     console.log('[backfill] Backfill complete!');
@@ -386,9 +443,11 @@ async function main(): Promise<void> {
     }
   } catch (err: any) {
     console.error('[backfill] Fatal error:', err.message);
-    console.error(JSON.stringify(stats, null, 2));
     process.exit(1);
   }
 }
 
-main();
+// Only run main if this is the entry point
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main();
+}

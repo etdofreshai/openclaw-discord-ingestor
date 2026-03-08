@@ -275,6 +275,227 @@ The **Since** dropdown in Manual mode (and optionally in Scheduled mode) control
 
 ---
 
+## 1. Web UI — Backfill Interface
+
+Start the server, then open:
+
+```
+http://localhost:3456/backfill
+```
+
+### Backfill Feature
+
+The backfill endpoint downloads and ingests Discord message attachments in bulk. This is useful for backfilling the attachment index after setup or after a gap in coverage.
+
+**Key properties:**
+
+- **Real-time progress streaming** — Live event log + progress bar via Server-Sent Events (SSE)
+- **Pause/Resume** — Pause an active backfill and resume later from where it stopped
+- **Batch control** — Concurrent download batches (default 10, configurable 1–50)
+- **Dry-run mode** — Download attachments without ingesting them (useful for testing)
+- **Run history** — Recent backfill runs saved to `.data/runs/backfill-runs.json`
+
+### Backfill UI
+
+1. **Control Panel** — Set batch size (concurrent downloads), optional message limit, starting page, and dry-run mode
+2. **Start Backfill** — Click to begin; runs in the background
+3. **Live Progress** — Real-time progress bar, page count, attachment stats, and ETA
+4. **Event Log** — Last 50 events with timestamps (downloads, ingestions, rate-limits)
+5. **Recent Runs** — History table with duration, stats, and final status
+6. **Pause/Resume** — Pause to stop, then resume later without losing progress
+
+### Backfill API
+
+All endpoints require `Authorization: Bearer <UI_TOKEN>` when `UI_TOKEN` is configured. When `UI_TOKEN` is unset, all routes are open.
+
+#### `POST /api/backfill/start`
+
+Start a new backfill run.
+
+```bash
+curl -X POST http://localhost:3456/api/backfill/start \
+  -H "Authorization: Bearer your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "batchSize": 10,
+    "limit": null,
+    "dryRun": false,
+    "resumeFrom": 1
+  }'
+```
+
+**Body params:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `batchSize` | number | 10 | Concurrent downloads (1–50) |
+| `limit` | number | null | Max messages to process; `null` = all |
+| `dryRun` | boolean | false | Download only (skip ingestion) |
+| `resumeFrom` | number | 1 | Page number to start from |
+
+**Response:**
+
+```json
+{
+  "runId": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "running",
+  "startedAt": "2024-01-15T10:30:00.000Z",
+  "progress": {
+    "runId": "550e8400-e29b-41d4-a716-446655440000",
+    "page": 1,
+    "totalPages": 1047,
+    "messagesProcessed": 0,
+    "downloadedCount": 0,
+    "ingestedCount": 0,
+    "skippedCount": 0,
+    "errorCount": 0,
+    "startTime": "2024-01-15T10:30:00.000Z",
+    "currentTime": "2024-01-15T10:30:00.000Z"
+  }
+}
+```
+
+#### `GET /api/backfill/status/:runId`
+
+Get current or past run status.
+
+```bash
+curl http://localhost:3456/api/backfill/status/550e8400-e29b-41d4-a716-446655440000 \
+  -H "Authorization: Bearer your-token"
+```
+
+**Response:**
+
+```json
+{
+  "runId": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "running",
+  "startedAt": "2024-01-15T10:30:00.000Z",
+  "completedAt": null,
+  "paused": false,
+  "progress": {
+    "page": 150,
+    "totalPages": 1047,
+    "messagesProcessed": 15000,
+    "downloadedCount": 2500,
+    "ingestedCount": 2490,
+    "skippedCount": 10,
+    "errorCount": 2,
+    "estimatedRemaining": 3600000
+  },
+  "stats": {
+    "totalMessages": 104697,
+    "messagesWithAttachments": 5200,
+    "downloadedAttachments": 2500,
+    "ingestedAttachments": 2490,
+    "skipped": 10,
+    "errors": 2
+  }
+}
+```
+
+#### `GET /api/backfill/runs`
+
+List recent backfill runs.
+
+```bash
+curl http://localhost:3456/api/backfill/runs \
+  -H "Authorization: Bearer your-token"
+```
+
+**Response:**
+
+```json
+{
+  "runs": [
+    {
+      "runId": "550e8400-e29b-41d4-a716-446655440000",
+      "startedAt": "2024-01-15T10:30:00.000Z",
+      "completedAt": "2024-01-15T14:45:30.000Z",
+      "status": "complete",
+      "stats": {
+        "totalMessages": 104697,
+        "messagesWithAttachments": 5200,
+        "downloadedAttachments": 5100,
+        "ingestedAttachments": 5090,
+        "skipped": 110,
+        "errors": 5
+      }
+    }
+  ]
+}
+```
+
+#### `POST /api/backfill/pause`
+
+Pause an active backfill.
+
+```bash
+curl -X POST http://localhost:3456/api/backfill/pause \
+  -H "Authorization: Bearer your-token" \
+  -H "Content-Type: application/json" \
+  -d '{"runId": "550e8400-e29b-41d4-a716-446655440000"}'
+```
+
+**Response:**
+
+```json
+{
+  "runId": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "paused",
+  "lastPage": 500
+}
+```
+
+#### `POST /api/backfill/resume/:runId`
+
+Resume a paused backfill.
+
+```bash
+curl -X POST http://localhost:3456/api/backfill/resume/550e8400-e29b-41d4-a716-446655440000 \
+  -H "Authorization: Bearer your-token"
+```
+
+**Response:**
+
+```json
+{
+  "runId": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "running",
+  "lastPage": 500
+}
+```
+
+#### `GET /api/backfill/events/:runId` (Server-Sent Events)
+
+Real-time progress stream. Client opens an `EventSource` and receives progress updates every page completion.
+
+```javascript
+const source = new EventSource('/api/backfill/events/550e8400-e29b-41d4-a716-446655440000');
+source.addEventListener('message', (event) => {
+  const progress = JSON.parse(event.data);
+  console.log(`Page ${progress.page}/${progress.totalPages}: ${progress.ingestedCount} ingested`);
+});
+source.addEventListener('complete', (event) => {
+  console.log('Backfill complete');
+  source.close();
+});
+source.addEventListener('error', (event) => {
+  console.error('Backfill error', JSON.parse(event.data));
+  source.close();
+});
+```
+
+**Event types:**
+
+| Event | Data | Fired when |
+|-------|------|-----------|
+| `message` (default) | `BackfillProgress` JSON | Page processing completes |
+| `complete` | `{ runId, status: "complete" }` | Backfill finishes successfully |
+| `error` | `{ runId, status: "error", message }` | Backfill encounters a fatal error |
+
+---
+
 ## API Reference
 
 All endpoints require `Authorization: Bearer <UI_TOKEN>` when `UI_TOKEN` is configured.
@@ -506,8 +727,9 @@ All runtime data is stored relative to the server's working directory:
 
 | Path | Contents |
 |------|----------|
-| `.data/jobs/jobs.json` | All scheduled jobs (JSON array) |
-| `.data/runs/runs.json` | Run log history (JSON array, capped at 200 entries) |
+| `.data/jobs/jobs.json` | All scheduled sync jobs (JSON array) |
+| `.data/runs/runs.json` | Sync run log history (JSON array, capped at 200 entries) |
+| `.data/runs/backfill-runs.json` | Backfill run log history (JSON array, capped at 200 entries) |
 | `.data/chrome-profile/discord-session.json` | Captured Discord session token |
 
 `.data/` is listed in `.gitignore` and should be mounted as a persistent volume in Docker.
