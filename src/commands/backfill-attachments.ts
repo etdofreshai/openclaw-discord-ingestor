@@ -174,6 +174,10 @@ async function ingestAttachment(
     created_at_source?: string;
   }
 ): Promise<boolean> {
+  console.log(
+    `[backfill-ingest] Ingesting ${attachmentMeta.filename} (${attachmentBuffer.length} bytes) ` +
+    `for message ${messageData.external_id}`
+  );
   const form = new FormData();
 
   // Message payload
@@ -220,19 +224,37 @@ async function ingestAttachment(
       if (res.status === 429) {
         const retryAfter = parseFloat(res.headers.get('retry-after') ?? '5');
         const waitMs = Math.ceil(retryAfter * 1000) + 500;
+        console.warn(
+          `[backfill-ingest] 429 rate limit, waiting ${waitMs}ms (attempt ${attempt + 1}/4)`
+        );
         await sleep(waitMs);
         continue;
       }
 
       if (!res.ok) {
         const body = await res.text();
-        throw new Error(`API returned ${res.status}: ${body.slice(0, 100)}`);
+        const errorMsg = `API returned ${res.status}: ${body.slice(0, 200)}`;
+        console.error(`[backfill-ingest] ${errorMsg}`);
+        throw new Error(errorMsg);
       }
 
+      console.log(
+        `[backfill-ingest] ✓ Successfully ingested ${attachmentMeta.filename}`
+      );
       return true;
     } catch (err) {
-      if (attempt >= 3) throw err;
-      await sleep(1000 * Math.pow(2, attempt));
+      if (attempt >= 3) {
+        console.error(
+          `[backfill-ingest] Failed after 4 attempts: ${(err as any).message}`
+        );
+        throw err;
+      }
+      const backoff = 1000 * Math.pow(2, attempt);
+      console.warn(
+        `[backfill-ingest] Error on attempt ${attempt + 1}, retrying in ${backoff}ms: ` +
+        `${(err as any).message}`
+      );
+      await sleep(backoff);
     }
   }
 
@@ -388,6 +410,10 @@ export async function backfillAttachments(
               });
             } catch (err: any) {
               stats.attachmentsSkipped++;
+              const errorMsg = String(err?.message ?? 'Unknown error');
+              console.error(
+                `[backfill] Error processing ${att.filename} (${message.external_id}): ${errorMsg}`
+              );
               addRecentItem({
                 filename: att.filename,
                 status: 'error',
@@ -395,7 +421,7 @@ export async function backfillAttachments(
                 size: att.size,
               });
               stats.errors.push({
-                message: String(err?.message ?? 'Unknown error'),
+                message: errorMsg,
                 attachmentUrl: att.url,
                 messageId: message.external_id,
               });
