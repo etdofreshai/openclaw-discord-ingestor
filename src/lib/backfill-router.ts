@@ -200,15 +200,39 @@ router.post('/api/refetch/start', requireAuth, async (req: Request, res: Respons
   };
 
   // Load Discord session
-  const session = await loadSession();
-  if (!session) {
-    res.status(400).json({ error: 'No Discord session found. Please log in via /discord-login first.' });
+  let session;
+  let user;
+  
+  try {
+    session = await loadSession();
+  } catch (err) {
+    console.error('[refetch] Error loading session:', err);
+    res.status(400).json({ 
+      error: 'Failed to load Discord session. Please log in via /discord-login first.',
+      requiresLogin: true 
+    });
     return;
   }
 
-  const user = await validateToken(session);
+  if (!session) {
+    res.status(400).json({ 
+      error: 'No Discord session found. Please log in via /discord-login first.',
+      requiresLogin: true 
+    });
+    return;
+  }
+
+  try {
+    user = await validateToken(session);
+  } catch (err) {
+    console.error('[refetch] Error validating token:', err);
+  }
+
   if (!user) {
-    res.status(400).json({ error: 'Discord token validation failed. Please log in again.' });
+    res.status(400).json({ 
+      error: 'Discord token validation failed. Please log in again via /discord-login.',
+      requiresLogin: true 
+    });
     return;
   }
 
@@ -956,7 +980,7 @@ function buildBackfillUI(requiresAuth: boolean = false): string {
         <label for="dryRun">Dry Run (download only, don't ingest)</label>
       </div>
       <div class="button-group">
-        <button id="startBtn" class="btn-primary" onclick="startBackfill()">▶ Start Backfill</button>
+        <button id="startBtn" class="btn-primary" onclick="startBackfill()">▶ Start Refetch</button>
         <button id="pauseBtn" class="btn-secondary" onclick="pauseBackfill()" disabled>❚❚ Pause</button>
         <button id="resumeBtn" class="btn-secondary" onclick="resumeBackfill()" disabled>⟳ Resume</button>
       </div>
@@ -1091,6 +1115,14 @@ function buildBackfillUI(requiresAuth: boolean = false): string {
 
         if (!res.ok) {
           const data = await res.json();
+          
+          // Check if login is required
+          if (data.requiresLogin) {
+            alert('Discord session expired or not found.\\n\\nRedirecting to login...');
+            window.location.href = '/discord-login';
+            return;
+          }
+          
           alert('Error: ' + (data.error || res.statusText));
           return;
         }
@@ -1321,8 +1353,22 @@ function buildBackfillUI(requiresAuth: boolean = false): string {
     window.addEventListener('DOMContentLoaded', () => {
       updateAuthBar();
       loadRuns();
+      checkDiscordSession();
       setInterval(loadRuns, 10000);
     });
+
+    function checkDiscordSession() {
+      // Show a helpful message if no Discord session is active
+      const infoBox = document.createElement('div');
+      infoBox.id = 'session-info';
+      infoBox.style.cssText = 'background: #fef3c7; border-left: 4px solid #f59e0b; padding: 12px; margin-bottom: 16px; border-radius: 4px; color: #92400e; font-size: 0.9rem;';
+      infoBox.innerHTML = '💡 <strong>Tip:</strong> Refetch requires an active Discord session. If you haven\\'t logged in yet, <a href="/discord-login" style="color: #b45309; text-decoration: underline;">click here to log in</a>.';
+      
+      const controlPanel = document.querySelector('.control-panel');
+      if (controlPanel) {
+        controlPanel.parentNode.insertBefore(infoBox, controlPanel);
+      }
+    }
   </script>
 </body>
 </html>`;
