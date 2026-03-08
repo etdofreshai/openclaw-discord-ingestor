@@ -127,6 +127,7 @@ async function downloadAttachment(
       if (res.status === 429) {
         const retryAfter = parseFloat(res.headers.get('retry-after') ?? '5');
         const waitMs = Math.ceil(retryAfter * 1000) + 500;
+        console.log(`[backfill-download] Rate limited on ${filename}, waiting ${waitMs}ms`);
         await sleep(waitMs);
         continue;
       }
@@ -137,8 +138,13 @@ async function downloadAttachment(
 
       const arrayBuffer = await res.arrayBuffer();
       const buffer = Buffer.from(arrayBuffer);
+      console.log(`[backfill-download] ✓ Downloaded ${filename} (${buffer.length} bytes)`);
       return buffer;
-    } catch (err) {
+    } catch (err: any) {
+      const errorMsg = String(err?.message ?? 'Unknown error');
+      console.log(
+        `[backfill-download] Attempt ${attempt + 1}/${maxRetries + 1} failed for ${filename}: ${errorMsg}`
+      );
       if (attempt >= maxRetries) throw err;
       await sleep(1000 * Math.pow(2, attempt));
     }
@@ -366,10 +372,14 @@ export async function backfillAttachments(
           const batch = attachments.slice(i, i + options.batchSize);
           const batchPromises = batch.map(async att => {
             try {
-              const url = att.url || att.proxy_url;
+              // Prefer proxy_url (Discord's stable proxy) over original URL which can expire
+              const url = att.proxy_url || att.url;
               if (!url) {
                 throw new Error('Attachment has no url or proxy_url');
               }
+              console.log(
+                `[backfill-download] ${att.filename} - using ${att.proxy_url ? 'proxy_url' : 'url'} (${url.substring(0, 80)}...)`
+              );
               const fileBuffer = await downloadAttachment(url, att.filename);
               stats.attachmentsDownloaded++;
               addRecentItem({
