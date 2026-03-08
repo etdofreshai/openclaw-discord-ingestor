@@ -852,6 +852,23 @@ function buildBackfillUI(requiresAuth: boolean = false): string {
         </tbody>
       </table>
     </div>
+
+    <div class="runs-section" id="recentItemsContainer" style="display: none; margin-top: 24px;">
+      <div class="runs-header">Last 10 Items Backfilled</div>
+      <table>
+        <thead>
+          <tr>
+            <th>Filename</th>
+            <th>Message ID</th>
+            <th>Status</th>
+            <th>Size</th>
+          </tr>
+        </thead>
+        <tbody id="recentItemsTable">
+          <tr><td colspan="4" style="text-align: center; color: #9ca3af;">No items yet</td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 
   <script>
@@ -1005,10 +1022,33 @@ function buildBackfillUI(requiresAuth: boolean = false): string {
         }
       }
 
+      // Update recent items
+      if (progress.recentItems && progress.recentItems.length > 0) {
+        updateRecentItems(progress.recentItems);
+      }
+
       // Add event to log
       if (progress.lastEvent) {
         addEvent(progress.lastEvent);
       }
+    }
+
+    function updateRecentItems(items) {
+      const container = document.getElementById('recentItemsContainer');
+      const tbody = document.getElementById('recentItemsTable');
+      
+      if (items.length === 0) {
+        container.style.display = 'none';
+        return;
+      }
+      
+      container.style.display = 'block';
+      tbody.innerHTML = items.map(item => {
+        const sizeStr = item.size ? (item.size / 1024 / 1024).toFixed(2) + ' MB' : '—';
+        const statusColor = item.status === 'ingested' ? '#22c55e' : item.status === 'downloaded' ? '#3b82f6' : item.status === 'error' ? '#ef4444' : '#f59e0b';
+        const statusBadge = '<span style="background:' + statusColor + '; color:white; padding:2px 6px; border-radius:3px; font-size:0.75rem; font-weight:600">' + item.status.toUpperCase() + '</span>';
+        return '<tr><td>' + escapeHtml(item.filename) + '</td><td style="font-size:0.85rem; font-family:monospace">' + item.messageId.slice(0, 12) + '...</td><td>' + statusBadge + '</td><td>' + sizeStr + '</td></tr>';
+      }).join('');
     }
 
     function addEvent(message) {

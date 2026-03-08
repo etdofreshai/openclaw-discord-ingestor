@@ -259,6 +259,12 @@ export type BackfillProgress = {
   startTime: Date;
   currentTime: Date;
   estimatedRemaining?: number;
+  recentItems?: Array<{
+    filename: string;
+    status: 'downloaded' | 'ingested' | 'skipped' | 'error';
+    messageId: string;
+    size?: number;
+  }>;
 };
 
 export type ProgressCallback = (progress: BackfillProgress) => void;
@@ -295,6 +301,25 @@ export async function backfillAttachments(
   const runId = randomUUID();
   const startPage = options.resumeFrom ?? 1;
   const startTime = new Date();
+  const recentItems: Array<{
+    filename: string;
+    status: 'downloaded' | 'ingested' | 'skipped' | 'error';
+    messageId: string;
+    size?: number;
+  }> = [];
+  const MAX_RECENT_ITEMS = 10;
+
+  function addRecentItem(item: {
+    filename: string;
+    status: 'downloaded' | 'ingested' | 'skipped' | 'error';
+    messageId: string;
+    size?: number;
+  }): void {
+    recentItems.push(item);
+    if (recentItems.length > MAX_RECENT_ITEMS) {
+      recentItems.shift();
+    }
+  }
 
   try {
     // Fetch first page to get total pages
@@ -331,6 +356,12 @@ export async function backfillAttachments(
               }
               const fileBuffer = await downloadAttachment(url, att.filename);
               stats.attachmentsDownloaded++;
+              addRecentItem({
+                filename: att.filename,
+                status: 'downloaded',
+                messageId: message.external_id,
+                size: att.size,
+              });
 
               if (options.dryRun) {
                 return;
@@ -349,8 +380,20 @@ export async function backfillAttachments(
                 }
               );
               stats.attachmentsIngested++;
+              addRecentItem({
+                filename: att.filename,
+                status: 'ingested',
+                messageId: message.external_id,
+                size: att.size,
+              });
             } catch (err: any) {
               stats.attachmentsSkipped++;
+              addRecentItem({
+                filename: att.filename,
+                status: 'error',
+                messageId: message.external_id,
+                size: att.size,
+              });
               stats.errors.push({
                 message: String(err?.message ?? 'Unknown error'),
                 attachmentUrl: att.url,
@@ -384,6 +427,7 @@ export async function backfillAttachments(
           startTime,
           currentTime: now,
           estimatedRemaining: remainingPages > 0 ? estimatedRemaining : 0,
+          recentItems: [...recentItems],
         });
       }
     }
