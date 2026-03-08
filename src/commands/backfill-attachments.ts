@@ -122,7 +122,17 @@ async function downloadAttachment(
 ): Promise<Buffer> {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+          'Accept': '*/*',
+          'Accept-Encoding': 'gzip, deflate, br',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache',
+        },
+      });
 
       if (res.status === 429) {
         const retryAfter = parseFloat(res.headers.get('retry-after') ?? '5');
@@ -243,8 +253,8 @@ async function ingestAttachment(
 
       if (!res.ok) {
         const body = await res.text();
-        const errorMsg = `API returned ${res.status}: ${body.slice(0, 200)}`;
-        console.error(`[backfill-ingest] ${errorMsg}`);
+        console.error(`[backfill-ingest] Full response (${res.status}):\n${body}`);
+        const errorMsg = `API returned ${res.status}: ${body.slice(0, 500)}`;
         throw new Error(errorMsg);
       }
 
@@ -382,15 +392,16 @@ export async function backfillAttachments(
           const batch = attachments.slice(i, i + options.batchSize);
           const batchPromises = batch.map(async att => {
             try {
-              // Prefer proxy_url (Discord's stable proxy) over original URL which can expire
-              const url = att.proxy_url || att.url;
-              if (!url) {
+              // Try url first (direct CDN), then fallback to proxy_url
+              // Both should work, but url is typically more reliable
+              const urlToTry = att.url || att.proxy_url;
+              if (!urlToTry) {
                 throw new Error('Attachment has no url or proxy_url');
               }
               console.log(
-                `[backfill-download] ${att.filename} - using ${att.proxy_url ? 'proxy_url' : 'url'} (${url.substring(0, 80)}...)`
+                `[backfill-download] ${att.filename} - using ${att.url ? 'url' : 'proxy_url'} (${urlToTry.substring(0, 80)}...)`
               );
-              const fileBuffer = await downloadAttachment(url, att.filename);
+              const fileBuffer = await downloadAttachment(urlToTry, att.filename);
               stats.attachmentsDownloaded++;
               addRecentItem({
                 filename: att.filename,
