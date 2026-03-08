@@ -533,7 +533,8 @@ export async function refetchAndIngestAttachments(
     errors: [],
   };
 
-  if (!session || !session.rest_token) {
+  const discordToken = session?.token ?? session?.rest_token;
+  if (!session || !discordToken) {
     throw new Error('No Discord session available for refetch. Please log in via /discord-login first.');
   }
 
@@ -542,7 +543,7 @@ export async function refetchAndIngestAttachments(
     
     // Get the user's guilds to find channels with attachments
     const guildsReq = await fetch('https://discord.com/api/v10/users/@me/guilds', {
-      headers: { Authorization: `Bearer ${session.rest_token}` },
+      headers: { Authorization: discordToken },
     });
     
     if (!guildsReq.ok) {
@@ -563,7 +564,7 @@ export async function refetchAndIngestAttachments(
 
       // Get channels in this guild
       const channelsReq = await fetch(`https://discord.com/api/v10/guilds/${guild.id}/channels`, {
-        headers: { Authorization: `Bearer ${session.rest_token}` },
+        headers: { Authorization: discordToken },
       });
 
       if (!channelsReq.ok) continue;
@@ -585,7 +586,7 @@ export async function refetchAndIngestAttachments(
           pageCount++;
           const messagesReq = await fetch(
             `https://discord.com/api/v10/channels/${channel.id}/messages?limit=100${before ? `&before=${before}` : ''}`,
-            { headers: { Authorization: `Bearer ${session.rest_token}` } }
+            { headers: { Authorization: discordToken } }
           );
 
           if (!messagesReq.ok) break;
