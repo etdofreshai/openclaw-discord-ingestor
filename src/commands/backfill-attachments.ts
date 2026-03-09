@@ -50,6 +50,18 @@ async function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function hasExistingAttachments(apiUrl: string, token: string, recordId: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${apiUrl}/api/messages/${recordId}/attachments`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return false;
+    const data = await res.json() as unknown[] | { attachments?: unknown[] };
+    const list = Array.isArray(data) ? data : (data.attachments ?? []);
+    return list.length > 0;
+  } catch { return false; }
+}
+
 /**
  * Fetch messages from Memory DB API with attachments, paginated.
  */
@@ -292,6 +304,7 @@ export type BackfillOptions = {
   limit?: number;
   dryRun: boolean;
   resumeFrom: number;
+  attachmentMode?: 'missing' | 'force';
 };
 
 export type BackfillProgress = {
@@ -404,6 +417,15 @@ export async function backfillAttachments(
 
         const attachments = message.metadata?.attachments ?? [];
         if (attachments.length === 0) continue;
+
+        if ((options.attachmentMode ?? 'missing') === 'missing') {
+          const hasAttachments = await hasExistingAttachments(apiUrl, readToken, message.record_id);
+          if (hasAttachments) {
+            stats.attachmentsSkipped += attachments.length;
+            addRecentItem({ filename: `[skipped] ${message.external_id}`, status: 'skipped', messageId: message.external_id });
+            continue;
+          }
+        }
 
         stats.messagesWithAttachments++;
         stats.totalAttachmentsFetched += attachments.length;

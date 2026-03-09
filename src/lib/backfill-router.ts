@@ -64,11 +64,12 @@ router.get('/backfill', (_req: Request, res: Response) => {
 // ── API: Start backfill ────────────────────────────────────────────────────────────
 
 router.post('/api/backfill/start', requireAuth, async (req: Request, res: Response) => {
-  const { batchSize = 10, limit, dryRun = false, resumeFrom = 1 } = req.body as {
+  const { batchSize = 10, limit, dryRun = false, resumeFrom = 1, attachmentMode = 'missing' } = req.body as {
     batchSize?: number;
     limit?: number;
     dryRun?: boolean;
     resumeFrom?: number;
+    attachmentMode?: 'missing' | 'force';
   };
 
   // Check if there's already an active backfill
@@ -86,6 +87,7 @@ router.post('/api/backfill/start', requireAuth, async (req: Request, res: Respon
     limit,
     dryRun,
     resumeFrom: Math.max(1, resumeFrom),
+    attachmentMode: attachmentMode === 'force' ? 'force' : 'missing',
   };
 
   try {
@@ -193,10 +195,11 @@ router.post('/api/backfill/start', requireAuth, async (req: Request, res: Respon
 // ── API: Start refetch (Discord fetch + in-place UPDATE + download + ingest) ────────────────
 
 router.post('/api/refetch/start', requireAuth, async (req: Request, res: Response) => {
-  const { batchSize = 10, limit, dryRun = false } = req.body as {
+  const { batchSize = 10, limit, dryRun = false, attachmentMode = 'missing' } = req.body as {
     batchSize?: number;
     limit?: number;
     dryRun?: boolean;
+    attachmentMode?: 'missing' | 'force';
   };
 
   // Load Discord session
@@ -413,6 +416,7 @@ router.get('/api/backfill/runs', requireAuth, async (_req: Request, res: Respons
       startedAt: run.startedAt,
       completedAt: run.completedAt,
       status: run.status,
+      attachmentMode: (run.options as any)?.attachmentMode ?? 'missing',
       stats: run.stats,
     })),
   });
@@ -961,6 +965,13 @@ function buildBackfillUI(requiresAuth: boolean = false): string {
     <div class="control-panel">
       <div class="control-row">
         <div class="control-group">
+          <label for="attachmentModeSelect">Attachment Mode</label>
+          <select id="attachmentModeSelect">
+            <option value="missing" selected>Missing only (skip if already downloaded)</option>
+            <option value="force">Force re-download all</option>
+          </select>
+        </div>
+        <div class="control-group">
           <label for="batchSize">Batch Size</label>
           <input type="number" id="batchSize" value="10" min="1" max="50">
           <small style="color:#6b7280">Concurrent downloads</small>
@@ -1027,6 +1038,7 @@ function buildBackfillUI(requiresAuth: boolean = false): string {
         <thead>
           <tr>
             <th>Started</th>
+            <th>Att. Mode</th>
             <th>Status</th>
             <th>Pages</th>
             <th>Downloaded</th>
@@ -1036,7 +1048,7 @@ function buildBackfillUI(requiresAuth: boolean = false): string {
           </tr>
         </thead>
         <tbody id="runsTable">
-          <tr><td colspan="7" style="text-align: center; color: #9ca3af;">Loading...</td></tr>
+          <tr><td colspan="8" style="text-align: center; color: #9ca3af;">Loading...</td></tr>
         </tbody>
       </table>
     </div>
@@ -1095,6 +1107,7 @@ function buildBackfillUI(requiresAuth: boolean = false): string {
     }
 
     async function startBackfill() {
+      const attachmentMode = document.getElementById('attachmentModeSelect').value;
       const batchSize = parseInt(document.getElementById('batchSize').value) || 10;
       const limit = document.getElementById('limit').value ? parseInt(document.getElementById('limit').value) : null;
       const resumeFrom = parseInt(document.getElementById('resumeFrom').value) || 1;
@@ -1104,7 +1117,7 @@ function buildBackfillUI(requiresAuth: boolean = false): string {
         const res = await fetch('/api/refetch/start', {
           method: 'POST',
           headers: Object.assign({ 'Content-Type': 'application/json' }, getHeaders()),
-          body: JSON.stringify({ batchSize, limit, dryRun }),
+          body: JSON.stringify({ attachmentMode, batchSize, limit, dryRun }),
         });
 
         if (res.status === 401) {
@@ -1338,7 +1351,8 @@ function buildBackfillUI(requiresAuth: boolean = false): string {
               const duration = completed ? Math.round((completed - started) / 1000) : '—';
               const durationStr = duration === '—' ? '—' : (duration < 60 ? duration + 's' : Math.round(duration / 60) + 'm');
               const statusClass = 'status-badge ' + run.status;
-              return '<tr><td>' + started.toLocaleString() + '</td><td><span class="' + statusClass + '">' + run.status + '</span></td><td>' + run.stats.totalMessages + '</td><td>' + run.stats.downloadedAttachments + '</td><td>' + run.stats.ingestedAttachments + '</td><td>' + run.stats.errors + '</td><td>' + durationStr + '</td></tr>';
+              const attMode = run.attachmentMode || 'missing';
+              return '<tr><td>' + started.toLocaleString() + '</td><td>' + attMode + '</td><td><span class="' + statusClass + '">' + run.status + '</span></td><td>' + run.stats.totalMessages + '</td><td>' + run.stats.downloadedAttachments + '</td><td>' + run.stats.ingestedAttachments + '</td><td>' + run.stats.errors + '</td><td>' + durationStr + '</td></tr>';
             }).join('');
       } catch (err) {
         console.error('Error loading runs:', err);
