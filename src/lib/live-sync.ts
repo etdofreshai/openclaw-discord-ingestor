@@ -1,6 +1,6 @@
 import pg from 'pg';
 import type { DiscordSession } from './session.js';
-import { isApiMode, writeMessagesViaApi, type ApiMessagePayload } from './api-writer.js';
+import { isApiMode, writeMessagesViaApi, type ApiMessagePayload, type DiscordAttachmentRef } from './api-writer.js';
 
 type DiscordAPIMessage = {
   id: string;
@@ -27,6 +27,8 @@ export type Normalized = {
   content: string;
   metadata: Record<string, unknown>;
   attachmentCount: number;
+  /** Raw Discord attachment objects (url, filename, size, content_type, etc.) */
+  attachments: DiscordAttachmentRef[];
 };
 
 export interface SyncResult {
@@ -35,6 +37,8 @@ export interface SyncResult {
   updated: number;
   skipped: number;
   attachmentsSeen: number;
+  attachmentsDownloaded: number;
+  attachmentsIngested: number;
 }
 
 export async function fetchChannelName(
@@ -146,7 +150,8 @@ function normalize(msg: DiscordAPIMessage): Normalized {
     'unknown';
 
   const recipient = `discord-channel:${msg.channel_id}`;
-  const attachmentCount = Array.isArray(msg.attachments) ? msg.attachments.length : 0;
+  const rawAttachments = Array.isArray(msg.attachments) ? (msg.attachments as DiscordAttachmentRef[]) : [];
+  const attachmentCount = rawAttachments.length;
   const hasRich = attachmentCount > 0 || (msg.embeds?.length ?? 0) > 0;
   const content = msg.content?.trim() || (hasRich ? '[non-text discord message]' : '');
 
@@ -157,6 +162,7 @@ function normalize(msg: DiscordAPIMessage): Normalized {
     recipient,
     content,
     attachmentCount,
+    attachments: rawAttachments,
     metadata: {
       channelId: msg.channel_id,
       author: msg.author,
@@ -248,7 +254,7 @@ async function fetchAndNormalize(
 async function writeToPostgres(
   pool: pg.Pool,
   normalized: Normalized[]
-): Promise<{ inserted: number; updated: number; skipped: number; attachmentsSeen: number }> {
+): Promise<{ inserted: number; updated: number; skipped: number; attachmentsSeen: number; attachmentsDownloaded: number; attachmentsIngested: number }> {
   const sourceId = await ensureSourceId(pool);
   let inserted = 0;
   let updated = 0;
@@ -292,7 +298,7 @@ async function writeToPostgres(
     }
   }
 
-  return { inserted, updated, skipped, attachmentsSeen };
+  return { inserted, updated, skipped, attachmentsSeen, attachmentsDownloaded: 0, attachmentsIngested: 0 };
 }
 
 /**
@@ -327,6 +333,7 @@ export async function syncChannel(
         metadata: msg.metadata,
       } satisfies ApiMessagePayload,
       attachmentCount: msg.attachmentCount,
+      attachments: msg.attachments,
     }));
 
     const writeResult = await writeMessagesViaApi(inputs);
@@ -354,7 +361,8 @@ export async function syncChannel(
     console.log(
       `[live-sync] Channel ${channelId} [${mode}]: fetched ${result.fetched}, ` +
       `inserted ${result.inserted}, updated ${result.updated}, ` +
-      `skipped ${result.skipped}, attachmentsSeen ${result.attachmentsSeen}`
+      `skipped ${result.skipped}, attachmentsSeen ${result.attachmentsSeen}, ` +
+      `attachmentsDownloaded ${result.attachmentsDownloaded}, attachmentsIngested ${result.attachmentsIngested}`
     );
   }
 

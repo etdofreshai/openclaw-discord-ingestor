@@ -46,6 +46,17 @@ export type ApiMessagePayload = {
   metadata: Record<string, unknown>;
 };
 
+/** A Discord attachment object as returned by the Discord API. */
+export type DiscordAttachmentRef = {
+  id: string;
+  filename: string;
+  size: number;
+  url: string;
+  proxy_url?: string;
+  content_type?: string;
+  [k: string]: unknown;
+};
+
 /** Write result for a single message — for internal use. */
 type SingleWriteOutcome = 'inserted' | 'updated' | 'skipped';
 
@@ -55,7 +66,129 @@ export type ApiWriteResult = {
   updated: number;
   skipped: number;
   attachmentsSeen: number;
+  attachmentsDownloaded: number;
+  attachmentsIngested: number;
 };
+
+/**
+ * Download a file from Discord CDN with retry/backoff.
+ */
+async function downloadDiscordFile(url: string, filename: string, maxRetries = 3): Promise<Buffer> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+            '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          Accept: '*/*',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Cache-Control': 'no-cache',
+          Pragma: 'no-cache',
+        },
+      });
+
+      if (res.status === 429) {
+        const retryAfter = parseFloat(res.headers.get('retry-after') ?? '5');
+        const waitMs = Math.ceil(retryAfter * 1000) + 500;
+        console.warn(`[api-writer] Rate limited downloading ${filename}, waiting ${waitMs}ms`);
+        await sleep(waitMs);
+        continue;
+      }
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+
+      const buf = Buffer.from(await res.arrayBuffer());
+      console.log(`[api-writer] ✓ Downloaded ${filename} (${buf.length} bytes)`);
+      return buf;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[api-writer] Attempt ${attempt + 1}/${maxRetries + 1} failed for ${filename}: ${msg}`
+      );
+      if (attempt >= maxRetries) throw err;
+      await sleep(INITIAL_BACKOFF_MS * Math.pow(2, attempt));
+    }
+  }
+
+  throw new Error(`Failed to download ${filename} after retries`);
+}
+
+/**
+ * Ingest a single file attachment via POST /api/messages/ingest (multipart).
+ * Returns true on success, false on failure.
+ */
+async function ingestOneFile(
+  baseUrl: string,
+  token: string,
+  payload: ApiMessagePayload,
+  fileBuffer: Buffer,
+  attachment: DiscordAttachmentRef
+): Promise<boolean> {
+  const filename = attachment.filename || 'attachment';
+  const contentType = attachment.content_type || 'application/octet-stream';
+  const attachmentsMeta = [
+    {
+      original_file_name: filename,
+      created_at_source: payload.timestamp,
+    },
+  ];
+
+  for (let attempt = 0; attempt <= MAX_API_RETRIES; attempt++) {
+    try {
+      const form = new FormData();
+      form.append('message', JSON.stringify(payload));
+      form.append(
+        'files',
+        new Blob([new Uint8Array(fileBuffer)], { type: contentType }),
+        filename
+      );
+      form.append('attachments_meta', JSON.stringify(attachmentsMeta));
+
+      const res = await fetch(`${baseUrl}/api/messages/ingest`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'User-Agent': 'openclaw-discord-ingestor/1.0',
+        },
+        body: form,
+      });
+
+      if (res.status === 429) {
+        const retryAfter = parseFloat(res.headers.get('retry-after') ?? '5');
+        const waitMs = Math.ceil(retryAfter * 1000) + 500;
+        console.warn(
+          `[api-writer] 429 rate limit on ingest for ${filename}, waiting ${waitMs}ms (attempt ${attempt + 1}/${MAX_API_RETRIES + 1})`
+        );
+        await sleep(waitMs);
+        continue;
+      }
+
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`API returned ${res.status}: ${body.slice(0, 500)}`);
+      }
+
+      console.log(`[api-writer] ✓ Ingested attachment ${filename} for ${payload.external_id}`);
+      return true;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (attempt >= MAX_API_RETRIES) {
+        console.error(
+          `[api-writer] Failed to ingest ${filename} for ${payload.external_id}: ${msg}`
+        );
+        return false;
+      }
+      const backoff = INITIAL_BACKOFF_MS * Math.pow(2, attempt);
+      console.warn(
+        `[api-writer] Error ingesting ${filename} (attempt ${attempt + 1}), retrying in ${backoff}ms: ${msg}`
+      );
+      await sleep(backoff);
+    }
+  }
+
+  return false;
+}
 
 /**
  * Write a single message to the API with retry/backoff.
@@ -158,31 +291,118 @@ async function writeOneMessage(
 }
 
 /**
- * Write a batch of normalized Discord messages to the Memory Database API.
+ * Write a message that has Discord file attachments.
  *
- * @param payloads     - Array of `{ payload, attachmentCount }` pairs to write.
- * @returns            - Aggregate result: inserted, updated, skipped, attachmentsSeen.
+ * For each attachment:
+ *   1. Download from Discord CDN
+ *   2. POST to /api/messages/ingest (multipart) to link it to the message
+ *
+ * If ALL attachments fail, falls back to plain JSON write so the message text
+ * is still persisted.
+ */
+async function writeMessageWithAttachments(
+  baseUrl: string,
+  writeToken: string,
+  payload: ApiMessagePayload,
+  attachments: DiscordAttachmentRef[]
+): Promise<{
+  outcome: SingleWriteOutcome;
+  downloaded: number;
+  ingested: number;
+}> {
+  let downloaded = 0;
+  let ingested = 0;
+
+  for (const att of attachments) {
+    const downloadUrl = att.url || att.proxy_url;
+    if (!downloadUrl) {
+      console.warn(
+        `[api-writer] No URL for attachment ${att.filename} in message ${payload.external_id} — skipping`
+      );
+      continue;
+    }
+
+    let fileBuffer: Buffer;
+    try {
+      fileBuffer = await downloadDiscordFile(downloadUrl, att.filename);
+      downloaded++;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[api-writer] Failed to download ${att.filename} for ${payload.external_id}: ${msg} — skipping`
+      );
+      continue;
+    }
+
+    const ok = await ingestOneFile(baseUrl, writeToken, payload, fileBuffer, att);
+    if (ok) ingested++;
+  }
+
+  // If at least one attachment ingested, the message is written (ingest upserts it)
+  if (ingested > 0) {
+    return { outcome: 'updated', downloaded, ingested };
+  }
+
+  // All attachments failed — fall back to plain JSON write so message text is preserved
+  console.warn(
+    `[api-writer] All attachment ingests failed for ${payload.external_id} — falling back to plain JSON write`
+  );
+  const outcome = await writeOneMessage(baseUrl, writeToken, payload);
+  return { outcome, downloaded, ingested };
+}
+
+/**
+ * Write a batch of normalized Discord messages to the Memory Database API.
+ * Messages with attachments are ingested via multipart /api/messages/ingest
+ * so the files are downloaded, stored, and linked in message_attachment_links.
+ * Messages without attachments are written via plain JSON POST /api/messages.
+ *
+ * @param payloads     - Array of `{ payload, attachmentCount, attachments? }` pairs to write.
+ * @returns            - Aggregate result: inserted, updated, skipped, attachmentsSeen,
+ *                       attachmentsDownloaded, attachmentsIngested.
  */
 export async function writeMessagesViaApi(
-  payloads: Array<{ payload: ApiMessagePayload; attachmentCount: number }>
+  payloads: Array<{
+    payload: ApiMessagePayload;
+    attachmentCount: number;
+    attachments?: DiscordAttachmentRef[];
+  }>
 ): Promise<ApiWriteResult> {
   const baseUrl = (process.env.MEMORY_DATABASE_API_URL ?? '').replace(/\/+$/, '');
-  const token = process.env.MEMORY_DATABASE_API_TOKEN ?? '';
+  const readToken = process.env.MEMORY_DATABASE_API_TOKEN ?? '';
+  const writeToken = process.env.MEMORY_DATABASE_API_WRITE_TOKEN ?? readToken;
 
   let inserted = 0;
   let updated = 0;
   let skipped = 0;
   let attachmentsSeen = 0;
+  let attachmentsDownloaded = 0;
+  let attachmentsIngested = 0;
 
-  for (const { payload, attachmentCount } of payloads) {
+  for (const { payload, attachmentCount, attachments } of payloads) {
     attachmentsSeen += attachmentCount;
-    const outcome = await writeOneMessage(baseUrl, token, payload);
-    if (outcome === 'inserted') inserted++;
-    else if (outcome === 'updated') updated++;
-    else skipped++;
+
+    if (attachmentCount > 0 && attachments && attachments.length > 0) {
+      const { outcome, downloaded, ingested } = await writeMessageWithAttachments(
+        baseUrl,
+        writeToken,
+        payload,
+        attachments
+      );
+      attachmentsDownloaded += downloaded;
+      attachmentsIngested += ingested;
+      if (outcome === 'inserted') inserted++;
+      else if (outcome === 'updated') updated++;
+      else skipped++;
+    } else {
+      const outcome = await writeOneMessage(baseUrl, writeToken, payload);
+      if (outcome === 'inserted') inserted++;
+      else if (outcome === 'updated') updated++;
+      else skipped++;
+    }
   }
 
-  return { inserted, updated, skipped, attachmentsSeen };
+  return { inserted, updated, skipped, attachmentsSeen, attachmentsDownloaded, attachmentsIngested };
 }
 
 function sleep(ms: number): Promise<void> {
