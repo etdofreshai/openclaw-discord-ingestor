@@ -1,3 +1,23 @@
+/**
+ * Backfill Router — Two Modes
+ *
+ * **Default backfill** (attachmentMode: 'missing'):
+ *   - Non-existing messages → download message, content, and create attachment links
+ *   - Existing messages → check if they have attachment links and content.
+ *     If missing, download those. If message + attachment links + content all exist → skip.
+ *
+ * **Force backfill** (attachmentMode: 'force'):
+ *   - Re-download message, attachment links, and content, overriding any existing values.
+ *
+ * Endpoints:
+ *   POST /api/backfill/start   — Start attachment backfill from local DB
+ *   POST /api/refetch/start    — Refetch from Discord API + download + ingest
+ *   GET  /api/backfill/status/:runId — Get run status & progress
+ *   GET  /api/backfill/runs    — List recent runs
+ *   POST /api/backfill/pause   — Pause active run
+ *   POST /api/backfill/resume/:runId — Resume paused run
+ *   GET  /api/backfill/events/:runId — SSE stream for live progress
+ */
 import { Router, Request, Response, NextFunction } from 'express';
 import {
   backfillAttachments,
