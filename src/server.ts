@@ -5,6 +5,7 @@ import loginRouter, { handleDiscordLoginWs } from './lib/login-server.js';
 import syncRouter from './lib/sync-router.js';
 import backfillRouter from './lib/backfill-router.js';
 import { startScheduler } from './lib/scheduler.js';
+import { getChannels } from './lib/channel-cache.js';
 
 const app = express();
 const server = http.createServer(app);
@@ -23,6 +24,16 @@ app.use(syncRouter);
 // Backfill UI + API routes
 app.use(backfillRouter);
 
+// Channel cache endpoint
+app.get('/api/channels', async (_req, res) => {
+  try {
+    const channels = await getChannels();
+    res.json(channels);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Health check
 app.get('/', (_req, res) => {
   res.json({
@@ -32,6 +43,7 @@ app.get('/', (_req, res) => {
       login: '/discord-login',
       status: '/discord-login/status',
       validate: '/discord-login/validate',
+      channels: '/api/channels',
       syncUi: '/sync',
       syncApi: '/api/sync',
       jobs: '/api/jobs',

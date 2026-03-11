@@ -382,21 +382,7 @@ export async function syncChannel(
 ): Promise<SyncResult> {
   const normalized = await fetchAndNormalize(session, channelId, options);
 
-  // Post channel metadata for name resolution
-  if (isApiMode()) {
-    try {
-      const info = await fetchChannelInfo(session, channelId);
-      let guildName: string | null = null;
-      if (info.guildId) {
-        guildName = await fetchGuildName(session, info.guildId);
-      }
-      await postChannelMetadata(channelId, info.channelName, info.guildId, guildName);
-    } catch (err) {
-      console.warn(`[live-sync] Could not post channel metadata for ${channelId}:`, err);
-    }
-  }
-
-  let result: SyncResult;
+    let result: SyncResult;
 
   if (isApiMode()) {
     // ── API write mode ───────────────────────────────────────────────────────
