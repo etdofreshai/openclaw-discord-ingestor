@@ -41,6 +41,70 @@ export interface SyncResult {
   attachmentsIngested: number;
 }
 
+/**
+ * Post channel metadata to the Memory Database API for name resolution.
+ */
+async function postChannelMetadata(channelId: string, channelName: string | null, guildId: string | null, guildName: string | null): Promise<void> {
+  const baseUrl = (process.env.MEMORY_DATABASE_API_URL ?? '').replace(/\/+$/, '');
+  const readToken = process.env.MEMORY_DATABASE_API_TOKEN ?? '';
+  const writeToken = process.env.MEMORY_DATABASE_API_WRITE_TOKEN ?? readToken;
+  if (!baseUrl || !writeToken) return;
+
+  try {
+    const res = await fetch(`${baseUrl}/api/discord/channels`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${writeToken}`,
+      },
+      body: JSON.stringify({ channelId, channelName, guildId, guildName }),
+    });
+    if (res.ok) {
+      console.log(`[live-sync] ✓ Posted channel metadata: #${channelName || channelId}`);
+    } else {
+      console.warn(`[live-sync] Failed to post channel metadata: ${res.status}`);
+    }
+  } catch (err) {
+    console.warn(`[live-sync] Error posting channel metadata:`, err);
+  }
+}
+
+/**
+ * Fetch full channel info (name + guild) from Discord API.
+ */
+async function fetchChannelInfo(
+  session: DiscordSession,
+  channelId: string
+): Promise<{ channelName: string | null; guildId: string | null }> {
+  const url = `https://discord.com/api/v10/channels/${channelId}`;
+  try {
+    const res = await fetch(url, { headers: { Authorization: session.token } });
+    if (!res.ok) return { channelName: null, guildId: null };
+    const data = await res.json() as any;
+    return {
+      channelName: data.name?.trim() || null,
+      guildId: data.guild_id?.trim() || null,
+    };
+  } catch {
+    return { channelName: null, guildId: null };
+  }
+}
+
+/**
+ * Fetch guild name from Discord API.
+ */
+async function fetchGuildName(session: DiscordSession, guildId: string): Promise<string | null> {
+  const url = `https://discord.com/api/v10/guilds/${guildId}`;
+  try {
+    const res = await fetch(url, { headers: { Authorization: session.token } });
+    if (!res.ok) return null;
+    const data = await res.json() as any;
+    return data.name?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchChannelName(
   session: DiscordSession,
   channelId: string
@@ -317,6 +381,20 @@ export async function syncChannel(
   options?: { limit?: number; before?: string; after?: string; verbose?: boolean }
 ): Promise<SyncResult> {
   const normalized = await fetchAndNormalize(session, channelId, options);
+
+  // Post channel metadata for name resolution
+  if (isApiMode()) {
+    try {
+      const info = await fetchChannelInfo(session, channelId);
+      let guildName: string | null = null;
+      if (info.guildId) {
+        guildName = await fetchGuildName(session, info.guildId);
+      }
+      await postChannelMetadata(channelId, info.channelName, info.guildId, guildName);
+    } catch (err) {
+      console.warn(`[live-sync] Could not post channel metadata for ${channelId}:`, err);
+    }
+  }
 
   let result: SyncResult;
 

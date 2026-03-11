@@ -7,6 +7,7 @@
     "import": "tsx src/index.ts",
     "sync": "tsx src/commands/live-sync.ts",
     "backfill-attachments": "tsx src/commands/backfill-attachments.ts",
+    "sync-channel-names": "tsx src/commands/sync-channel-names.ts",
     "server": "tsx src/server.ts",
     "typecheck": "tsc --noEmit"
   },
