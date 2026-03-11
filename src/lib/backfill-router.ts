@@ -18,6 +18,7 @@
  *   POST /api/backfill/resume/:runId — Resume paused run
  *   GET  /api/backfill/events/:runId — SSE stream for live progress
  */
+import crypto from 'node:crypto';
 import { Router, Request, Response, NextFunction } from 'express';
 import {
   backfillAttachments,
@@ -50,6 +51,108 @@ const activeRuns = new Map<
 
 // Track SSE clients for each run
 const sseClients = new Map<string, Set<Response>>();
+
+// ── Backfill Queue ────────────────────────────────────────────────────────────
+
+interface QueuedBackfill {
+  runId: string;
+  channelId?: string;
+  options: BackfillOptions;
+  queuedAt: Date;
+}
+
+const backfillQueue: QueuedBackfill[] = [];
+
+async function processNextInQueue() {
+  if (backfillQueue.length === 0) return;
+
+  // Check if something is already running
+  const existingActive = await getActiveBackfillRun();
+  if (existingActive) return;
+
+  const next = backfillQueue.shift();
+  if (!next) return;
+
+  // Start the queued backfill
+  try {
+    const run = await createBackfillRun(next.options, next.runId);
+
+    activeRuns.set(run.runId, {
+      progress: {
+        runId: run.runId,
+        page: next.options.resumeFrom,
+        totalPages: 0,
+        messagesProcessed: 0,
+        downloadedCount: 0,
+        ingestedCount: 0,
+        skippedCount: 0,
+        errorCount: 0,
+        startTime: new Date(),
+        currentTime: new Date(),
+      },
+    });
+
+    sseClients.set(run.runId, new Set());
+
+    runBackfillInBackground(run.runId, next.options);
+  } catch (err) {
+    console.error(`[backfill-queue] Error starting queued run ${next.runId}:`, err);
+    // Try next in queue
+    processNextInQueue();
+  }
+}
+
+function runBackfillInBackground(runId: string, options: BackfillOptions) {
+  backfillAttachments(options, (progress) => {
+    activeRuns.set(runId, { progress });
+
+    const clients = sseClients.get(runId);
+    if (clients) {
+      const msg = 'data: ' + JSON.stringify(progress) + '\n\n';
+      clients.forEach(client => client.write(msg));
+    }
+  })
+    .then(async (stats) => {
+      await updateBackfillRun(runId, {
+        status: 'complete',
+        completedAt: new Date().toISOString(),
+        stats: {
+          totalMessages: stats.messagesProcessed,
+          messagesWithAttachments: stats.messagesWithAttachments,
+          downloadedAttachments: stats.attachmentsDownloaded,
+          ingestedAttachments: stats.attachmentsIngested,
+          skipped: stats.attachmentsSkipped,
+          errors: stats.errors.length,
+        },
+      });
+
+      const clients = sseClients.get(runId);
+      if (clients) {
+        const msg = 'event: complete\ndata: ' + JSON.stringify({ runId, status: 'complete' }) + '\n\n';
+        clients.forEach(client => { client.write(msg); client.end(); });
+        sseClients.delete(runId);
+      }
+      activeRuns.delete(runId);
+      processNextInQueue();
+    })
+    .catch(async (err) => {
+      console.error(`[backfill] Error in backfill run ${runId}:`, err);
+      await updateBackfillRun(runId, {
+        status: 'error',
+        completedAt: new Date().toISOString(),
+        error: err.message || String(err),
+      });
+
+      const clients = sseClients.get(runId);
+      if (clients) {
+        const msg = 'event: error\ndata: ' + JSON.stringify({ runId, status: 'error', message: err.message || String(err) }) + '\n\n';
+        clients.forEach(client => { client.write(msg); client.end(); });
+        sseClients.delete(runId);
+      }
+      activeRuns.delete(runId);
+      processNextInQueue();
+    });
+}
 
 // ── Auth middleware ────────────────────────────────────────────────────────────
 
@@ -84,23 +187,14 @@ router.get('/backfill', (_req: Request, res: Response) => {
 // ── API: Start backfill ────────────────────────────────────────────────────────────
 
 router.post('/api/backfill/start', requireAuth, async (req: Request, res: Response) => {
-  const { batchSize = 10, limit, dryRun = false, resumeFrom = 1, attachmentMode = 'missing' } = req.body as {
+  const { batchSize = 10, limit, dryRun = false, resumeFrom = 1, attachmentMode = 'missing', channelId } = req.body as {
     batchSize?: number;
     limit?: number;
     dryRun?: boolean;
     resumeFrom?: number;
     attachmentMode?: 'missing' | 'force';
+    channelId?: string;
   };
-
-  // Check if there's already an active backfill
-  const existingActive = await getActiveBackfillRun();
-  if (existingActive) {
-    res.status(409).json({
-      error: 'A backfill is already running.',
-      runId: existingActive.runId,
-    });
-    return;
-  }
 
   const options: BackfillOptions = {
     batchSize: Math.max(1, batchSize),
@@ -110,10 +204,31 @@ router.post('/api/backfill/start', requireAuth, async (req: Request, res: Respon
     attachmentMode: attachmentMode === 'force' ? 'force' : 'missing',
   };
 
+  // Check if there's already an active backfill
+  const existingActive = await getActiveBackfillRun();
+  if (existingActive || backfillQueue.length > 0) {
+    // Queue the request instead of rejecting
+    const queuedRunId = crypto.randomUUID();
+    backfillQueue.push({
+      runId: queuedRunId,
+      channelId,
+      options,
+      queuedAt: new Date(),
+    });
+    const position = backfillQueue.length;
+
+    res.status(202).json({
+      queued: true,
+      runId: queuedRunId,
+      channelId,
+      position,
+    });
+    return;
+  }
+
   try {
     const run = await createBackfillRun(options);
 
-    // Initialize active run tracking
     activeRuns.set(run.runId, {
       progress: {
         runId: run.runId,
@@ -138,75 +253,7 @@ router.post('/api/backfill/start', requireAuth, async (req: Request, res: Respon
       progress: activeRuns.get(run.runId)?.progress,
     });
 
-    // Start backfill in background (don't await)
-    backfillAttachments(options, (progress) => {
-      activeRuns.set(run.runId, { progress });
-
-      // Broadcast to all SSE clients
-      const clients = sseClients.get(run.runId);
-      if (clients) {
-        const msg = 'data: ' + JSON.stringify(progress) + '\n\n';
-        clients.forEach(client => {
-          client.write(msg);
-        });
-      }
-    })
-      .then(async (stats) => {
-        // Mark as complete
-        await updateBackfillRun(run.runId, {
-          status: 'complete',
-          completedAt: new Date().toISOString(),
-          stats: {
-            totalMessages: stats.messagesProcessed,
-            messagesWithAttachments: stats.messagesWithAttachments,
-            downloadedAttachments: stats.attachmentsDownloaded,
-            ingestedAttachments: stats.attachmentsIngested,
-            skipped: stats.attachmentsSkipped,
-            errors: stats.errors.length,
-          },
-        });
-
-        // Broadcast completion
-        const clients = sseClients.get(run.runId);
-        if (clients) {
-          const msg = 'event: complete\ndata: ' + JSON.stringify({
-            runId: run.runId,
-            status: 'complete',
-          }) + '\n\n';
-          clients.forEach(client => {
-            client.write(msg);
-            client.end();
-          });
-          sseClients.delete(run.runId);
-        }
-        activeRuns.delete(run.runId);
-      })
-      .catch(async (err) => {
-        console.error(`[backfill] Error in backfill run ${run.runId}:`, err);
-        
-        // Mark as error
-        await updateBackfillRun(run.runId, {
-          status: 'error',
-          completedAt: new Date().toISOString(),
-          error: err.message || String(err),
-        });
-
-        // Broadcast error
-        const clients = sseClients.get(run.runId);
-        if (clients) {
-          const msg = 'event: error\ndata: ' + JSON.stringify({
-            runId: run.runId,
-            status: 'error',
-            message: err.message || String(err),
-          }) + '\n\n';
-          clients.forEach(client => {
-            client.write(msg);
-            client.end();
-          });
-          sseClients.delete(run.runId);
-        }
-        activeRuns.delete(run.runId);
-      });
+    runBackfillInBackground(run.runId, options);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -361,6 +408,7 @@ router.post('/api/refetch/start', requireAuth, async (req: Request, res: Respons
           sseClients.delete(run.runId);
         }
         activeRuns.delete(run.runId);
+        processNextInQueue();
       })
       .catch(async (err) => {
         console.error(`[refetch] Error in refetch run ${run.runId}:`, err);
@@ -387,6 +435,7 @@ router.post('/api/refetch/start', requireAuth, async (req: Request, res: Respons
           sseClients.delete(run.runId);
         }
         activeRuns.delete(run.runId);
+        processNextInQueue();
       });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to start refetch' });
@@ -397,6 +446,20 @@ router.post('/api/refetch/start', requireAuth, async (req: Request, res: Respons
 
 router.get('/api/backfill/status/:runId', requireAuth, async (req: Request, res: Response) => {
   const runId = String(req.params.runId);
+
+  // Check if it's in the queue (not yet started)
+  const queueIdx = backfillQueue.findIndex(q => q.runId === runId);
+  if (queueIdx !== -1) {
+    const queued = backfillQueue[queueIdx];
+    res.json({
+      runId,
+      status: 'queued',
+      position: queueIdx + 1,
+      channelId: queued.channelId,
+      queuedAt: queued.queuedAt,
+    });
+    return;
+  }
 
   const run = await getBackfillRun(runId);
   if (!run) {
@@ -424,6 +487,33 @@ router.get('/api/backfill/status/:runId', requireAuth, async (req: Request, res:
     },
     stats: run.stats,
   });
+});
+
+// ── API: Get backfill queue ────────────────────────────────────────────────────────────
+
+router.get('/api/backfill/queue', requireAuth, (_req: Request, res: Response) => {
+  res.json({
+    queue: backfillQueue.map((q, i) => ({
+      runId: q.runId,
+      channelId: q.channelId,
+      queuedAt: q.queuedAt,
+      position: i + 1,
+    })),
+    length: backfillQueue.length,
+  });
+});
+
+// ── API: Remove from queue ────────────────────────────────────────────────────────────
+
+router.delete('/api/backfill/queue/:runId', requireAuth, (req: Request, res: Response) => {
+  const runId = String(req.params.runId);
+  const idx = backfillQueue.findIndex(q => q.runId === runId);
+  if (idx === -1) {
+    res.status(404).json({ error: 'Not found in queue.' });
+    return;
+  }
+  backfillQueue.splice(idx, 1);
+  res.json({ removed: true, runId });
 });
 
 // ── API: List backfill runs ────────────────────────────────────────────────────────────
@@ -576,6 +666,7 @@ router.post('/api/backfill/resume/:runId', requireAuth, async (req: Request, res
         sseClients.delete(runId);
       }
       activeRuns.delete(runId);
+      processNextInQueue();
     })
     .catch(async (err) => {
       await updateBackfillRun(runId, {
@@ -598,6 +689,7 @@ router.post('/api/backfill/resume/:runId', requireAuth, async (req: Request, res
         sseClients.delete(runId);
       }
       activeRuns.delete(runId);
+      processNextInQueue();
     });
 });
 

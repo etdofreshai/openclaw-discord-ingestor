@@ -53,11 +53,12 @@ async function saveBackfillRuns(runs: BackfillRun[]): Promise<void> {
 }
 
 export async function createBackfillRun(
-  options: BackfillRun['options']
+  options: BackfillRun['options'],
+  preAssignedRunId?: string,
 ): Promise<BackfillRun> {
   const runs = await loadBackfillRuns();
   const run: BackfillRun = {
-    runId: crypto.randomUUID(),
+    runId: preAssignedRunId || crypto.randomUUID(),
     startedAt: new Date().toISOString(),
     status: 'running',
     options,
