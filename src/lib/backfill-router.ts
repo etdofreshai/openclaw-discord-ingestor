@@ -46,6 +46,7 @@ const activeRuns = new Map<
   {
     progress: BackfillProgress;
     controller?: AbortController;
+    cancelRequested?: boolean;
   }
 >();
 
@@ -104,7 +105,11 @@ async function processNextInQueue() {
 
 function runBackfillInBackground(runId: string, options: BackfillOptions) {
   backfillAttachments(options, (progress) => {
-    activeRuns.set(runId, { progress });
+    const existing = activeRuns.get(runId);
+    if (existing?.cancelRequested) {
+      throw new Error('CANCELLED');
+    }
+    activeRuns.set(runId, { ...existing, progress });
 
     const clients = sseClients.get(runId);
     if (clients) {
@@ -136,11 +141,12 @@ function runBackfillInBackground(runId: string, options: BackfillOptions) {
       processNextInQueue();
     })
     .catch(async (err) => {
-      console.error(`[backfill] Error in backfill run ${runId}:`, err);
+      const wasCancelled = err?.message === 'CANCELLED';
+      if (!wasCancelled) console.error(`[backfill] Error in backfill run ${runId}:`, err);
       await updateBackfillRun(runId, {
-        status: 'error',
+        status: wasCancelled ? 'paused' : 'error',
         completedAt: new Date().toISOString(),
-        error: err.message || String(err),
+        error: wasCancelled ? undefined : (err.message || String(err)),
       });
 
       const clients = sseClients.get(runId);
@@ -555,6 +561,11 @@ router.post('/api/backfill/pause', requireAuth, async (req: Request, res: Respon
 
   const activeData = activeRuns.get(runId);
   const currentPage = activeData?.progress.page ?? run.lastPage;
+
+  // Signal the running loop to stop at next progress callback
+  if (activeData) {
+    activeRuns.set(runId, { ...activeData, cancelRequested: true });
+  }
 
   await updateBackfillRun(runId, {
     paused: true,
