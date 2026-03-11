@@ -138,6 +138,15 @@ const KNOWN_DM_CHANNELS: Record<string, ChannelInfo> = {
   '219932194204811265': { channelName: 'lexzap', guildId: null, guildName: 'Direct Messages' },
 };
 
+export async function refreshChannels(): Promise<Record<string, ChannelInfo>> {
+  memoryCache = null; // bust memory cache
+  const fresh = await refreshFromDiscord();
+  for (const [id, info] of Object.entries(KNOWN_DM_CHANNELS)) {
+    if (!fresh.channels[id]) fresh.channels[id] = info;
+  }
+  return fresh.channels;
+}
+
 export async function getChannels(): Promise<Record<string, ChannelInfo>> {
   // Check memory cache first
   if (memoryCache && Date.now() - new Date(memoryCache.updatedAt).getTime() < MAX_AGE_MS) {

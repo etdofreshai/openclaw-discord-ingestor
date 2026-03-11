@@ -5,7 +5,7 @@ import loginRouter, { handleDiscordLoginWs } from './lib/login-server.js';
 import syncRouter from './lib/sync-router.js';
 import backfillRouter from './lib/backfill-router.js';
 import { startScheduler } from './lib/scheduler.js';
-import { getChannels } from './lib/channel-cache.js';
+import { getChannels, refreshChannels } from './lib/channel-cache.js';
 import { requireAuth } from './lib/auth-middleware.js';
 
 const app = express();
@@ -34,6 +34,15 @@ app.get('/api/channels', requireAuth, async (_req, res) => {
   try {
     const channels = await getChannels();
     res.json(channels);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/channels/refresh', requireAuth, async (_req, res) => {
+  try {
+    const channels = await refreshChannels();
+    res.json({ ok: true, count: Object.keys(channels).length });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
