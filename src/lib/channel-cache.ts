@@ -94,12 +94,49 @@ async function refreshFromDiscord(): Promise<ChannelCache> {
     await new Promise((r) => setTimeout(r, 300));
   }
 
+  // Fetch DM channels
+  try {
+    const dmRes = await fetch('https://discord.com/api/v10/users/@me/channels', {
+      headers: { Authorization: session.token },
+    });
+    if (dmRes.ok) {
+      const dmChannels = (await dmRes.json()) as Array<{
+        id: string;
+        type: number;
+        name?: string | null;
+        recipients?: Array<{ id: string; username: string; global_name?: string | null }>;
+      }>;
+      for (const dm of dmChannels) {
+        if (dm.type === 1 && dm.recipients?.length) {
+          // DM channel - name is the other user
+          const recipient = dm.recipients[0];
+          const displayName = recipient.global_name || recipient.username;
+          channels[dm.id] = { channelName: displayName, guildId: null, guildName: 'Direct Messages' };
+        } else if (dm.type === 3) {
+          // Group DM
+          const name = dm.name || dm.recipients?.map(r => r.global_name || r.username).join(', ') || 'Group DM';
+          channels[dm.id] = { channelName: name, guildId: null, guildName: 'Direct Messages' };
+        }
+      }
+      console.log(`[channel-cache] Added ${dmChannels.length} DM channels`);
+    } else {
+      console.warn(`[channel-cache] Failed to fetch DM channels: ${dmRes.status}`);
+    }
+  } catch (err) {
+    console.warn('[channel-cache] Error fetching DM channels:', err);
+  }
+
   const cache: ChannelCache = { updatedAt: new Date().toISOString(), channels };
   await writeCacheFile(cache);
   memoryCache = cache;
   console.log(`[channel-cache] Cached ${Object.keys(channels).length} channels`);
   return cache;
 }
+
+// Known DM channels seeded as fallback
+const KNOWN_DM_CHANNELS: Record<string, ChannelInfo> = {
+  '219932194204811265': { channelName: 'lexzap', guildId: null, guildName: 'Direct Messages' },
+};
 
 export async function getChannels(): Promise<Record<string, ChannelInfo>> {
   // Check memory cache first
@@ -116,5 +153,11 @@ export async function getChannels(): Promise<Record<string, ChannelInfo>> {
 
   // Refresh from Discord API
   const fresh = await refreshFromDiscord();
+  // Merge known DM channels as fallback (don't overwrite API results)
+  for (const [id, info] of Object.entries(KNOWN_DM_CHANNELS)) {
+    if (!fresh.channels[id]) {
+      fresh.channels[id] = info;
+    }
+  }
   return fresh.channels;
 }
