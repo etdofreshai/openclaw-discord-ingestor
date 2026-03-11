@@ -6,6 +6,7 @@ import syncRouter from './lib/sync-router.js';
 import backfillRouter from './lib/backfill-router.js';
 import { startScheduler } from './lib/scheduler.js';
 import { getChannels } from './lib/channel-cache.js';
+import { requireAuth } from './lib/auth-middleware.js';
 
 const app = express();
 const server = http.createServer(app);
@@ -24,8 +25,8 @@ app.use(syncRouter);
 // Backfill UI + API routes
 app.use(backfillRouter);
 
-// Channel cache endpoint
-app.get('/api/channels', async (_req, res) => {
+// Channel cache endpoint (protected by UI_TOKEN when set)
+app.get('/api/channels', requireAuth, async (_req, res) => {
   try {
     const channels = await getChannels();
     res.json(channels);

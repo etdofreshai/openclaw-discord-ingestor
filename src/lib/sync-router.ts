@@ -27,30 +27,9 @@ import {
   type SincePreset,
   type CadencePreset,
 } from './since-presets.js';
+import { requireAuth } from './auth-middleware.js';
 
 const router = Router();
-
-// ── Auth middleware ────────────────────────────────────────────────────────────
-
-function requireAuth(req: Request, res: Response, next: NextFunction): void {
-  const uiToken = process.env.UI_TOKEN;
-  if (!uiToken) {
-    next();
-    return;
-  }
-
-  const authHeader = req.headers['authorization'];
-  const bearer = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
-  const queryToken = typeof req.query.token === 'string' ? req.query.token : undefined;
-  const provided = bearer ?? queryToken;
-
-  if (!provided || provided !== uiToken) {
-    res.status(401).json({ error: 'Unauthorized: invalid or missing UI_TOKEN.' });
-    return;
-  }
-
-  next();
-}
 
 // ── Sync UI page — always public; client-side modal handles auth if UI_TOKEN is set ──
 
