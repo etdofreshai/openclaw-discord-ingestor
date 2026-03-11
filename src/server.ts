@@ -26,6 +26,10 @@ app.use(syncRouter);
 app.use(backfillRouter);
 
 // Channel cache endpoint (protected by UI_TOKEN when set)
+app.get('/api/health', (_req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
 app.get('/api/channels', requireAuth, async (_req, res) => {
   try {
     const channels = await getChannels();
