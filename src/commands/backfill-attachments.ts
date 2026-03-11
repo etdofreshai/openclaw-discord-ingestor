@@ -563,43 +563,26 @@ export async function refetchAndIngestAttachments(
   const recentItems: Array<{ filename: string; messageId: string; status: string; size?: number }> = [];
 
   try {
-    const { fetchChannelMessages } = await import('../lib/live-sync.js');
-    
-    // Get the user's guilds to find channels with attachments
-    const guildsReq = await fetch('https://discord.com/api/v10/users/@me/guilds', {
-      headers: { Authorization: discordToken },
-    });
-    
-    if (!guildsReq.ok) {
-      throw new Error(`Failed to fetch guilds: ${guildsReq.status}`);
+    const { loadJobs } = await import('../lib/job-store.js');
+
+    // Only process channels that have a configured sync job
+    const jobs = await loadJobs();
+    const enabledChannels = jobs.filter(j => j.enabled).map(j => j.channel);
+
+    if (enabledChannels.length === 0) {
+      console.warn('[refetch] No enabled jobs found — nothing to refetch. Add channels via the UI first.');
+      return stats;
     }
 
-    const guilds = await guildsReq.json() as Array<{ id: string; name: string }>;
-    console.log(`[refetch] Found ${guilds.length} guilds`);
+    console.log(`[refetch] Restricting to ${enabledChannels.length} configured channel(s): ${enabledChannels.join(', ')}`);
 
-    let messagesWithAttachmentsCount = 0;
     const maxMessages = options.limit ?? Infinity;
 
-    // Iterate through guilds and channels
-    for (const guild of guilds) {
+    // Only iterate over configured channels (not all guilds/channels)
+    for (const channelId of enabledChannels) {
       if (stats.messagesProcessed >= maxMessages) break;
 
-      console.log(`[refetch] Guild: ${guild.name} (${guild.id})`);
-
-      // Get channels in this guild
-      const channelsReq = await fetch(`https://discord.com/api/v10/guilds/${guild.id}/channels`, {
-        headers: { Authorization: discordToken },
-      });
-
-      if (!channelsReq.ok) continue;
-      
-      const channels = await channelsReq.json() as Array<{ id: string; name: string; type: number }>;
-
-      // Type 0 = text channel
-      for (const channel of channels.filter((c: any) => c.type === 0)) {
-        if (stats.messagesProcessed >= maxMessages) break;
-
-        console.log(`[refetch]   Channel: #${channel.name}`);
+      console.log(`[refetch]   Channel: ${channelId}`);
 
         // Fetch messages from this channel
         let hasMore = true;
@@ -609,7 +592,7 @@ export async function refetchAndIngestAttachments(
         while (hasMore && stats.messagesProcessed < maxMessages) {
           pageCount++;
           const messagesReq = await fetch(
-            `https://discord.com/api/v10/channels/${channel.id}/messages?limit=100${before ? `&before=${before}` : ''}`,
+            `https://discord.com/api/v10/channels/${channelId}/messages?limit=100${before ? `&before=${before}` : ''}`,
             { headers: { Authorization: discordToken } }
           );
 
@@ -627,7 +610,6 @@ export async function refetchAndIngestAttachments(
             if (stats.messagesProcessed >= maxMessages) break;
 
             stats.messagesProcessed++;
-            messagesWithAttachmentsCount++;
 
             console.log(`[refetch] Message ${msg.id}: ${msg.attachments.length} attachments`);
 
@@ -652,11 +634,11 @@ export async function refetchAndIngestAttachments(
                     id: msg.id,
                     external_id: msg.id,
                     sender: msg.author?.username ?? 'unknown',
-                    recipient: `discord-channel:${channel.id}`,
+                    recipient: `discord-channel:${channelId}`,
                     content: msg.content ?? '[message with attachments]',
                     timestamp: msg.timestamp,
                     metadata: {
-                      channelId: channel.id,
+                      channelId: channelId,
                       author: msg.author,
                       attachments: msg.attachments,
                       embeds: msg.embeds ?? [],
@@ -704,8 +686,7 @@ export async function refetchAndIngestAttachments(
           }
         }
 
-        console.log(`[refetch]   Channel #${channel.name}: ${pageCount} pages fetched`);
-      }
+      console.log(`[refetch]   Channel #${channelId}: ${pageCount} pages fetched`);
     }
 
     console.log(`[refetch] Complete: ${stats.messagesProcessed} messages with attachments, ${stats.attachmentsIngested} ingested`);
