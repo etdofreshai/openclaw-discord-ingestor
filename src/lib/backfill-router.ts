@@ -76,7 +76,7 @@ async function processNextInQueue() {
 
   // Start the queued backfill
   try {
-    const run = await createBackfillRun(next.options, next.runId);
+    const run = await createBackfillRun(next.options, next.runId, next.channelId);
 
     activeRuns.set(run.runId, {
       progress: {
@@ -233,7 +233,7 @@ router.post('/api/backfill/start', requireAuth, async (req: Request, res: Respon
   }
 
   try {
-    const run = await createBackfillRun(options);
+    const run = await createBackfillRun(options, undefined, channelId);
 
     activeRuns.set(run.runId, {
       progress: {

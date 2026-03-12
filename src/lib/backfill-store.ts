@@ -4,9 +4,10 @@ import crypto from 'node:crypto';
 
 export interface BackfillRun {
   runId: string;
+  channelId?: string;
   startedAt: string;
   completedAt?: string;
-  status: 'running' | 'paused' | 'complete' | 'error';
+  status: 'running' | 'paused' | 'complete' | 'error' | 'cancelled';
   options: {
     batchSize: number;
     limit?: number;
@@ -55,10 +56,12 @@ async function saveBackfillRuns(runs: BackfillRun[]): Promise<void> {
 export async function createBackfillRun(
   options: BackfillRun['options'],
   preAssignedRunId?: string,
+  channelId?: string,
 ): Promise<BackfillRun> {
   const runs = await loadBackfillRuns();
   const run: BackfillRun = {
     runId: preAssignedRunId || crypto.randomUUID(),
+    channelId,
     startedAt: new Date().toISOString(),
     status: 'running',
     options,
