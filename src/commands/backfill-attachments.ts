@@ -138,31 +138,34 @@ async function fetchDiscordMessagesWithAttachments(
  * Refresh an expired Discord CDN attachment URL by fetching the message from Discord API.
  */
 async function refreshDiscordAttachmentUrl(
-  channelId: string,
-  messageId: string,
-  filename: string,
+  _channelId: string,
+  _messageId: string,
+  expiredUrl: string,
   discordToken: string
 ): Promise<string | null> {
   try {
-    const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages/${messageId}`, {
-      headers: { Authorization: discordToken }
+    const res = await fetch('https://discord.com/api/v10/attachments/refresh-urls', {
+      method: 'POST',
+      headers: {
+        Authorization: discordToken,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ attachment_urls: [expiredUrl] }),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => '');
-      console.log(`[backfill-download] Discord API refresh failed: HTTP ${res.status} ${body.slice(0, 100)}`);
+      console.log(`[backfill-download] Discord URL refresh failed: HTTP ${res.status} ${body.slice(0, 150)}`);
       return null;
     }
-    const msg = await res.json() as any;
-    const att = msg.attachments?.find((a: any) => a.filename === filename);
-    if (!att) {
-      // Try matching by partial filename or index if exact match fails
-      const firstAtt = msg.attachments?.[0];
-      console.log(`[backfill-download] No attachment match for "${filename}" — message has ${msg.attachments?.length || 0} attachments: ${msg.attachments?.map((a: any) => a.filename).join(', ')}`);
-      return firstAtt?.url || null;
+    const data = await res.json() as any;
+    const refreshed = data.refreshed_urls?.[0];
+    if (!refreshed?.refreshed) {
+      console.log(`[backfill-download] Discord URL refresh returned no refreshed URL`);
+      return null;
     }
-    return att.url;
+    return refreshed.refreshed;
   } catch (e: any) {
-    console.log(`[backfill-download] Discord API refresh error: ${e.message}`);
+    console.log(`[backfill-download] Discord URL refresh error: ${e.message}`);
     return null;
   }
 }
@@ -503,10 +506,10 @@ export async function backfillAttachments(
                   if (!session?.token) {
                     console.log(`[backfill-download] URL expired but no Discord session available — cannot refresh`);
                   }
-                  if (channelId && session?.token) {
-                    console.log(`[backfill-download] URL expired, refreshing from Discord API (channel=${channelId}, msg=${message.external_id})...`);
+                  if (session?.token) {
+                    console.log(`[backfill-download] URL expired, refreshing via Discord refresh-urls API...`);
                     const freshUrl = await refreshDiscordAttachmentUrl(
-                      channelId, message.external_id, att.filename, session.token
+                      channelId || '', message.external_id, urlToTry, session.token
                     );
                     if (freshUrl) {
                       console.log(`[backfill-download] Got fresh URL from Discord API, retrying download...`);
