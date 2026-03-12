@@ -54,8 +54,13 @@ async function executeJob(job: Job, overrides?: JobRunOverrides): Promise<void> 
     return;
   }
 
-  // Resolve sincePreset → effective after snowflake at runtime.
-  // Precedence: sincePreset overrides explicit `after` when both are set.
+  // Resolve effective after snowflake at runtime.
+  // Priority order:
+  //   1. lastSyncedAt (if set) → fetch since last successful sync
+  //   2. startDate (if set, and no lastSyncedAt) → fetch since configured start
+  //   3. sincePreset (legacy fallback) → fetch last N hours/days
+  //   4. Explicit `after` field (already a snowflake)
+  //   5. Nothing → fetch from beginning of time (snowflake '0')
   const now = new Date();
   const runSincePreset = overrides?.sincePreset ?? job.sincePreset;
   const runAfter = overrides?.after ?? job.after;
@@ -67,13 +72,30 @@ async function executeJob(job: Job, overrides?: JobRunOverrides): Promise<void> 
   const overlapPctRaw = Number(process.env.SCHEDULE_SINCE_OVERLAP_PERCENT ?? '10');
   const overlapPct = Number.isFinite(overlapPctRaw) ? Math.min(Math.max(overlapPctRaw, 0), 100) : 10;
 
-  const effectiveAfter = runSincePreset
-    ? (() => {
-        const baseMs = sincePresetToMs(runSincePreset);
-        const lookbackMs = Math.round(baseMs * (1 + overlapPct / 100));
-        return timestampToSnowflake(now.getTime() - lookbackMs);
-      })()
-    : runAfter;
+  let afterMs: number | null = null;
+  let useStaticAfter = false;
+
+  if (job.lastSyncedAt && !overrides?.after) {
+    afterMs = new Date(job.lastSyncedAt).getTime();
+  } else if (job.startDate && !job.lastSyncedAt && !overrides?.after) {
+    afterMs = new Date(job.startDate).getTime();
+  } else if (runSincePreset) {
+    const baseMs = sincePresetToMs(runSincePreset);
+    const lookbackMs = Math.round(baseMs * (1 + overlapPct / 100));
+    afterMs = now.getTime() - lookbackMs;
+  } else if (runAfter) {
+    useStaticAfter = true;
+  }
+
+  // Apply startDate as a floor even when lastSyncedAt is set
+  if (job.startDate && afterMs !== null) {
+    const startMs = new Date(job.startDate).getTime();
+    afterMs = Math.max(afterMs, startMs);
+  }
+
+  const effectiveAfter = useStaticAfter
+    ? runAfter
+    : (afterMs !== null ? timestampToSnowflake(afterMs) : (runAfter || '0'));
 
   const startedAt = now.toISOString();
   await updateJob(job.id, { lastStatus: 'running', lastRunAt: startedAt });
@@ -118,7 +140,7 @@ async function executeJob(job: Job, overrides?: JobRunOverrides): Promise<void> 
     });
 
     const finishedAt = new Date().toISOString();
-    await updateJob(job.id, { lastStatus: 'success', lastRunAt: finishedAt });
+    await updateJob(job.id, { lastStatus: 'success', lastRunAt: finishedAt, lastSyncedAt: finishedAt });
     await updateRun(run.runId, {
       finishedAt,
       status: 'success',

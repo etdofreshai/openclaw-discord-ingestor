@@ -40,6 +40,10 @@ export interface Job {
   updatedAt: string;
   lastRunAt?: string;
   lastStatus?: 'success' | 'error' | 'running';
+  /** ISO timestamp of last SUCCESSFUL sync. Used as the `after` floor for next run. */
+  lastSyncedAt?: string;
+  /** Optional earliest date — never fetch messages before this timestamp (ISO string). */
+  startDate?: string;
 }
 
 const DATA_ROOT = process.env.DATA_DIR
