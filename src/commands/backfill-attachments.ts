@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { randomUUID } from 'crypto';
-import { loadSession } from '../lib/session.js';
+import { loadSession, type DiscordSession } from '../lib/session.js';
 import { validateToken } from '../lib/token-validator.js';
 import { syncChannel, fetchChannelMessages } from '../lib/live-sync.js';
 
@@ -134,6 +134,28 @@ async function fetchDiscordMessagesWithAttachments(
 /**
  * Download a file from Discord CDN.
  */
+/**
+ * Refresh an expired Discord CDN attachment URL by fetching the message from Discord API.
+ */
+async function refreshDiscordAttachmentUrl(
+  channelId: string,
+  messageId: string,
+  filename: string,
+  discordToken: string
+): Promise<string | null> {
+  try {
+    const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages/${messageId}`, {
+      headers: { Authorization: discordToken }
+    });
+    if (!res.ok) return null;
+    const msg = await res.json() as any;
+    const att = msg.attachments?.find((a: any) => a.filename === filename);
+    return att?.url || null;
+  } catch {
+    return null;
+  }
+}
+
 async function downloadAttachment(
   url: string,
   filename: string,
@@ -162,7 +184,9 @@ async function downloadAttachment(
       }
 
       if (!res.ok) {
-        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+        const err = new Error(`HTTP ${res.status}: ${res.statusText}`) as any;
+        err.httpStatus = res.status;
+        throw err;
       }
 
       const arrayBuffer = await res.arrayBuffer();
@@ -435,6 +459,15 @@ export async function backfillAttachments(
         // Process attachments in batches
         for (let i = 0; i < attachments.length; i += options.batchSize) {
           const batch = attachments.slice(i, i + options.batchSize);
+          // Load Discord session lazily for URL refresh on 404
+          let discordSession: DiscordSession | null | undefined;
+          async function getDiscordSession(): Promise<DiscordSession | null> {
+            if (discordSession === undefined) {
+              discordSession = await loadSession();
+            }
+            return discordSession;
+          }
+
           const batchPromises = batch.map(async att => {
             try {
               // Try url first (direct CDN), then fallback to proxy_url
@@ -446,7 +479,35 @@ export async function backfillAttachments(
               console.log(
                 `[backfill-download] ${att.filename} - using ${att.url ? 'url' : 'proxy_url'} (${urlToTry.substring(0, 80)}...)`
               );
-              const fileBuffer = await downloadAttachment(urlToTry, att.filename);
+
+              let fileBuffer: Buffer;
+              try {
+                fileBuffer = await downloadAttachment(urlToTry, att.filename);
+              } catch (dlErr: any) {
+                // On 404, try refreshing the URL from Discord API
+                if (dlErr?.httpStatus === 404) {
+                  const channelId = message.metadata?.channelId
+                    || message.recipient?.replace('discord-channel:', '');
+                  const session = await getDiscordSession();
+                  if (channelId && session?.token) {
+                    console.log(`[backfill-download] URL expired, refreshing from Discord API...`);
+                    const freshUrl = await refreshDiscordAttachmentUrl(
+                      channelId, message.external_id, att.filename, session.token
+                    );
+                    if (freshUrl) {
+                      console.log(`[backfill-download] Got fresh URL from Discord API, retrying download...`);
+                      fileBuffer = await downloadAttachment(freshUrl, att.filename, 1);
+                    } else {
+                      throw dlErr;
+                    }
+                  } else {
+                    throw dlErr;
+                  }
+                } else {
+                  throw dlErr;
+                }
+              }
+
               stats.attachmentsDownloaded++;
               addRecentItem({
                 filename: att.filename,
