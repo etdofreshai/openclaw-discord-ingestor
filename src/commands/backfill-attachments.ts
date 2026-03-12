@@ -484,45 +484,34 @@ export async function backfillAttachments(
 
           const batchPromises = batch.map(async att => {
             try {
-              // Try url first (direct CDN), then fallback to proxy_url
-              // Both should work, but url is typically more reliable
-              const urlToTry = att.url || att.proxy_url;
-              if (!urlToTry) {
+              const storedUrl = att.url || att.proxy_url;
+              if (!storedUrl) {
                 throw new Error('Attachment has no url or proxy_url');
               }
-              console.log(
-                `[backfill-download] ${att.filename} - using ${att.url ? 'url' : 'proxy_url'} (${urlToTry.substring(0, 80)}...)`
-              );
+
+              // Always refresh the URL upfront — stored CDN URLs expire after a few days
+              const session = await getDiscordSession();
+              let urlToTry = storedUrl;
+              if (session?.token) {
+                const freshUrl = await refreshDiscordAttachmentUrl(
+                  '', message.external_id, storedUrl, session.token
+                );
+                if (freshUrl) {
+                  urlToTry = freshUrl;
+                  console.log(`[backfill-download] ${att.filename} - refreshed URL, downloading...`);
+                } else {
+                  console.log(`[backfill-download] ${att.filename} - URL refresh failed, falling back to stored URL`);
+                }
+              } else {
+                console.log(`[backfill-download] ${att.filename} - no session, using stored URL (may be expired)`);
+              }
 
               let fileBuffer: Buffer;
               try {
                 fileBuffer = await downloadAttachment(urlToTry, att.filename);
               } catch (dlErr: any) {
-                // On 404, try refreshing the URL from Discord API
-                if (dlErr?.httpStatus === 404) {
-                  const channelId = message.metadata?.channelId
-                    || message.recipient?.replace('discord-channel:', '');
-                  const session = await getDiscordSession();
-                  if (!session?.token) {
-                    console.log(`[backfill-download] URL expired but no Discord session available — cannot refresh`);
-                  }
-                  if (session?.token) {
-                    console.log(`[backfill-download] URL expired, refreshing via Discord refresh-urls API...`);
-                    const freshUrl = await refreshDiscordAttachmentUrl(
-                      channelId || '', message.external_id, urlToTry, session.token
-                    );
-                    if (freshUrl) {
-                      console.log(`[backfill-download] Got fresh URL from Discord API, retrying download...`);
-                      fileBuffer = await downloadAttachment(freshUrl, att.filename, 1);
-                    } else {
-                      throw dlErr;
-                    }
-                  } else {
-                    throw dlErr;
-                  }
-                } else {
-                  throw dlErr;
-                }
+                // If download still fails and we used a refreshed URL, nothing more we can do
+                throw dlErr;
               }
 
               stats.attachmentsDownloaded++;
