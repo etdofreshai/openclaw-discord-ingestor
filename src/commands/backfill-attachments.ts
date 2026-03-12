@@ -147,11 +147,22 @@ async function refreshDiscordAttachmentUrl(
     const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages/${messageId}`, {
       headers: { Authorization: discordToken }
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      console.log(`[backfill-download] Discord API refresh failed: HTTP ${res.status} ${body.slice(0, 100)}`);
+      return null;
+    }
     const msg = await res.json() as any;
     const att = msg.attachments?.find((a: any) => a.filename === filename);
-    return att?.url || null;
-  } catch {
+    if (!att) {
+      // Try matching by partial filename or index if exact match fails
+      const firstAtt = msg.attachments?.[0];
+      console.log(`[backfill-download] No attachment match for "${filename}" — message has ${msg.attachments?.length || 0} attachments: ${msg.attachments?.map((a: any) => a.filename).join(', ')}`);
+      return firstAtt?.url || null;
+    }
+    return att.url;
+  } catch (e: any) {
+    console.log(`[backfill-download] Discord API refresh error: ${e.message}`);
     return null;
   }
 }
@@ -489,8 +500,11 @@ export async function backfillAttachments(
                   const channelId = message.metadata?.channelId
                     || message.recipient?.replace('discord-channel:', '');
                   const session = await getDiscordSession();
+                  if (!session?.token) {
+                    console.log(`[backfill-download] URL expired but no Discord session available — cannot refresh`);
+                  }
                   if (channelId && session?.token) {
-                    console.log(`[backfill-download] URL expired, refreshing from Discord API...`);
+                    console.log(`[backfill-download] URL expired, refreshing from Discord API (channel=${channelId}, msg=${message.external_id})...`);
                     const freshUrl = await refreshDiscordAttachmentUrl(
                       channelId, message.external_id, att.filename, session.token
                     );
