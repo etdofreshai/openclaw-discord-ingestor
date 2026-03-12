@@ -449,36 +449,38 @@ const REMOTE_LOGIN_HTML = /* html */ `<!DOCTYPE html>
 <title>Discord Login</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
-  body{background:#1a1a2e;color:#e0e0e0;font-family:system-ui,sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:16px 8px}
-  h1{font-size:1.4rem;font-weight:600;margin-bottom:12px;color:#fff}
-  .notice{background:#7289da;color:#fff;padding:12px;border-radius:8px;margin-bottom:12px;max-width:900px;width:100%;font-size:.85rem}
-  #status-bar{width:100%;max-width:900px;background:#2f3136;border:1px solid #444;border-radius:8px;padding:10px 16px;margin-bottom:12px;font-size:.9rem;min-height:42px;display:flex;align-items:center;gap:8px}
+  body{background:#0f1117;color:#e0e0e0;font-family:system-ui,-apple-system,sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:16px 8px}
+  h1{font-size:1.4rem;font-weight:600;margin-bottom:12px;color:#e0e0e0}
+  .notice{background:#161a26;color:#64b5f6;padding:12px;border-radius:8px;margin-bottom:12px;max-width:900px;width:100%;font-size:.85rem;border:1px solid #1e2230}
+  #status-bar{width:100%;max-width:900px;background:#161a26;border:1px solid #1e2230;border-radius:8px;padding:10px 16px;margin-bottom:12px;font-size:.9rem;min-height:42px;display:flex;align-items:center;gap:8px}
   #status-dot{width:10px;height:10px;border-radius:50%;background:#555;flex-shrink:0;transition:background .3s}
-  #status-dot.running{background:#22c55e;animation:pulse 1.2s infinite}
-  #status-dot.success{background:#22c55e}
-  #status-dot.timeout,#status-dot.error{background:#ef4444}
+  #status-dot.running{background:#4caf50;animation:pulse 1.2s infinite}
+  #status-dot.success{background:#4caf50}
+  #status-dot.timeout,#status-dot.error{background:#f44336}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
   #timer{margin-left:auto;font-size:.8rem;color:#888;white-space:nowrap}
   .controls{width:100%;max-width:900px;display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;align-items:center}
-  button{background:#7289da;color:#fff;border:none;border-radius:6px;padding:8px 16px;cursor:pointer;font-size:.85rem;font-weight:500;transition:background .15s;white-space:nowrap}
-  button:hover{background:#5b6eae}
-  button:disabled{background:#374151;cursor:not-allowed;color:#6b7280}
-  button.danger{background:#ed4245}
-  button.danger:hover{background:#c03537}
-  button.secondary{background:#4f545c}
-  button.secondary:hover{background:#67707b}
-  #type-input{flex:1;min-width:180px;background:#40444b;border:1px solid #444;color:#e0e0e0;border-radius:6px;padding:8px 12px;font-size:.85rem}
-  #type-input:focus{outline:none;border-color:#7289da}
+  button{background:#1a1f2e;color:#e0e0e0;border:1px solid #444;border-radius:6px;padding:8px 16px;cursor:pointer;font-size:.85rem;font-weight:500;transition:background .15s;white-space:nowrap}
+  button:hover{background:#252b3b}
+  button:disabled{background:#13151e;cursor:not-allowed;color:#555;border-color:#1e2230}
+  button.danger{background:#3a1b1b;color:#f44336;border-color:#f44336}
+  button.danger:hover{background:#5a2020}
+  button.secondary{background:#1a1f2e;color:#999;border-color:#333}
+  button.secondary:hover{background:#252b3b;color:#e0e0e0}
+  button.primary{background:#1565c0;color:#fff;border-color:#1565c0}
+  button.primary:hover{background:#1976d2}
+  #type-input{flex:1;min-width:180px;background:#1a1f2e;border:1px solid #333;color:#e0e0e0;border-radius:6px;padding:8px 12px;font-size:.85rem}
+  #type-input:focus{outline:none;border-color:#64b5f6}
   .key-group{display:flex;gap:4px}
-  #canvas-wrap{width:100%;max-width:900px;position:relative;background:#111;border:2px solid #333;border-radius:8px;overflow:hidden;cursor:pointer;outline:none;transition:border-color .2s}
+  #canvas-wrap{width:100%;max-width:900px;position:relative;background:#13151e;border:2px solid #1e2230;border-radius:8px;overflow:hidden;cursor:pointer;outline:none;transition:border-color .2s}
   #canvas-wrap.inactive{cursor:default;pointer-events:none}
-  #canvas-wrap.canvas-focused{border-color:#7289da;box-shadow:0 0 0 2px rgba(114,137,218,.3)}
+  #canvas-wrap.canvas-focused{border-color:#64b5f6;box-shadow:0 0 0 2px rgba(100,181,246,.2)}
   #screen{display:block;width:100%;height:auto;user-select:none}
   #placeholder{width:100%;aspect-ratio:16/10;display:flex;align-items:center;justify-content:center;color:#555;font-size:1rem}
-  #click-flash{position:absolute;pointer-events:none;border-radius:50%;width:28px;height:28px;background:rgba(114,137,218,.5);border:2px solid rgba(114,137,218,.9);transform:translate(-50%,-50%) scale(0);transition:transform .08s ease-out,opacity .35s ease-out;opacity:0}
+  #click-flash{position:absolute;pointer-events:none;border-radius:50%;width:28px;height:28px;background:rgba(100,181,246,.4);border:2px solid rgba(100,181,246,.8);transform:translate(-50%,-50%) scale(0);transition:transform .08s ease-out,opacity .35s ease-out;opacity:0}
   #click-flash.active{transform:translate(-50%,-50%) scale(1);opacity:1}
-  #overlay-msg{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.7);font-size:1.3rem;font-weight:600;color:#fff}
-  #focus-hint{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.6);color:#aaa;font-size:.75rem;padding:3px 10px;border-radius:20px;pointer-events:none;transition:opacity .3s}
+  #overlay-msg{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.7);font-size:1.3rem;font-weight:600;color:#e0e0e0}
+  #focus-hint{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.6);color:#888;font-size:.75rem;padding:3px 10px;border-radius:20px;pointer-events:none;transition:opacity .3s}
   #canvas-wrap.canvas-focused #focus-hint{opacity:0}
 </style>
 </head>
