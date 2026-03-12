@@ -580,6 +580,24 @@ router.post('/api/backfill/pause', requireAuth, async (req: Request, res: Respon
   });
 });
 
+// ── API: Force-cancel (ghost cleanup) ─────────────────────────────────────────────
+
+router.post('/api/backfill/runs/:runId/force-cancel', requireAuth, async (req: Request, res: Response) => {
+  const { runId } = req.params;
+  try {
+    await updateBackfillRun(runId, {
+      status: 'cancelled',
+      completedAt: new Date().toISOString(),
+      error: 'Force-cancelled by user',
+    });
+    // Also remove from activeRuns if somehow still there
+    activeRuns.delete(runId);
+    res.json({ runId, status: 'cancelled' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── API: Resume backfill ────────────────────────────────────────────────────────────
 
 router.post('/api/backfill/resume/:runId', requireAuth, async (req: Request, res: Response) => {
