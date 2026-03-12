@@ -69,7 +69,8 @@ async function fetchDiscordMessagesWithAttachments(
   apiUrl: string,
   token: string,
   page: number,
-  limit = 100
+  limit = 100,
+  channelId?: string
 ): Promise<{
   messages: Array<{
     id: string;
@@ -95,7 +96,7 @@ async function fetchDiscordMessagesWithAttachments(
   total: number;
   totalPages: number;
 }> {
-  const url = `${apiUrl}/api/messages?source=discord&limit=${limit}&page=${page}`;
+  const url = `${apiUrl}/api/messages?source=discord&limit=${limit}&page=${page}${channelId ? `&recipient=discord-channel:${channelId}` : ''}`;
 
   for (let attempt = 0; attempt <= 3; attempt++) {
     try {
@@ -305,6 +306,7 @@ export type BackfillOptions = {
   dryRun: boolean;
   resumeFrom: number;
   attachmentMode?: 'missing' | 'force';
+  channelId?: string;
 };
 
 export type BackfillProgress = {
@@ -399,7 +401,7 @@ export async function backfillAttachments(
 
   try {
     // Fetch first page to get total pages
-    let firstPage = await fetchDiscordMessagesWithAttachments(apiUrl, readToken, 1, 100);
+    let firstPage = await fetchDiscordMessagesWithAttachments(apiUrl, readToken, 1, 100, options.channelId);
 
     const totalPages = firstPage.totalPages;
     const maxMessages = options.limit ?? firstPage.total;
@@ -407,7 +409,7 @@ export async function backfillAttachments(
     let messagesProcessedTotal = 0;
 
     for (let page = startPage; page <= totalPages && messagesProcessedTotal < maxMessages; page++) {
-      const pageData = await fetchDiscordMessagesWithAttachments(apiUrl, readToken, page, 100);
+      const pageData = await fetchDiscordMessagesWithAttachments(apiUrl, readToken, page, 100, options.channelId);
 
       for (const message of pageData.messages) {
         if (messagesProcessedTotal >= maxMessages) break;

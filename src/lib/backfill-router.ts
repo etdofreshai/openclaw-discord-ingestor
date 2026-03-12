@@ -208,6 +208,7 @@ router.post('/api/backfill/start', requireAuth, async (req: Request, res: Respon
     dryRun,
     resumeFrom: Math.max(1, resumeFrom),
     attachmentMode: attachmentMode === 'force' ? 'force' : 'missing',
+    channelId,
   };
 
   // Check if there's already an active backfill
