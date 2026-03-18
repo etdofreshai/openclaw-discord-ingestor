@@ -378,7 +378,7 @@ async function writeToPostgres(
 export async function syncChannel(
   session: DiscordSession,
   channelId: string,
-  options?: { limit?: number; before?: string; after?: string; verbose?: boolean }
+  options?: { limit?: number; before?: string; after?: string; verbose?: boolean; conflictMode?: string }
 ): Promise<SyncResult> {
   const normalized = await fetchAndNormalize(session, channelId, options);
 
@@ -400,7 +400,7 @@ export async function syncChannel(
       attachments: msg.attachments,
     }));
 
-    const writeResult = await writeMessagesViaApi(inputs);
+    const writeResult = await writeMessagesViaApi(inputs, options?.conflictMode as any);
     result = { fetched: normalized.length, ...writeResult };
   } else {
     // ── PostgreSQL write mode ────────────────────────────────────────────────

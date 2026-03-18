@@ -290,9 +290,11 @@ router.post('/api/jobs/:id/run', requireAuth, async (req: Request, res: Response
     return;
   }
 
+  const conflictMode = req.body?.conflict_mode || req.query.conflict_mode as string | undefined;
+
   // Trigger async through the global queue — respond immediately; result visible in /api/runs.
   // runJobNow enqueues internally, so the job respects SCHEDULER_CONCURRENCY and spacing.
-  runJobNow(job).catch((err: unknown) => {
+  runJobNow(job, { conflictMode }).catch((err: unknown) => {
     console.error(`[API] runJobNow error for job ${job.id}:`, err);
   });
 

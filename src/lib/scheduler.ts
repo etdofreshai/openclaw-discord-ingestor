@@ -23,6 +23,7 @@ export type JobRunOverrides = {
   before?: string;
   after?: string;
   sincePreset?: Job['sincePreset'];
+  conflictMode?: string;
 };
 
 /**
@@ -137,6 +138,7 @@ async function executeJob(job: Job, overrides?: JobRunOverrides): Promise<void> 
       before: runBefore,
       after: effectiveAfter,
       verbose: true,
+      conflictMode: overrides?.conflictMode,
     });
 
     const finishedAt = new Date().toISOString();
