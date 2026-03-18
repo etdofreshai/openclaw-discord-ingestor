@@ -112,6 +112,9 @@ export async function ensureChromium(): Promise<void> {
           '--disable-sync',
           '--no-first-run',
           '--metrics-recording-only',
+          // Required for rootless/unprivileged Docker environments
+          '--no-zygote',
+          '--single-process',
           'about:blank',
         ],
         {
