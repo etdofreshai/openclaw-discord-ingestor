@@ -309,6 +309,8 @@ router.post('/api/jobs/:id/run-all', requireAuth, async (req: Request, res: Resp
     return;
   }
 
+  const conflictMode = req.body?.conflict_mode || req.query.conflict_mode as string | undefined;
+
   // Run one-shot full backfill for this channel via the queue.
   // Uses since=all and a very large logical limit; sync paginates internally.
   runJobNow(job, {
@@ -316,6 +318,7 @@ router.post('/api/jobs/:id/run-all', requireAuth, async (req: Request, res: Resp
     limit: 10_000_000_000,
     before: undefined,
     after: undefined,
+    conflictMode,
   }).catch((err: unknown) => {
     console.error(`[API] run-all error for job ${job.id}:`, err);
   });
