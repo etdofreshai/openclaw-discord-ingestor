@@ -76,9 +76,9 @@ async function executeJob(job: Job, overrides?: JobRunOverrides): Promise<void> 
   let afterMs: number | null = null;
   let useStaticAfter = false;
 
-  if (job.lastSyncedAt && !overrides?.after) {
+  if (job.lastSyncedAt && !overrides?.after && runSincePreset !== 'all') {
     afterMs = new Date(job.lastSyncedAt).getTime();
-  } else if (job.startDate && !job.lastSyncedAt && !overrides?.after) {
+  } else if (job.startDate && !job.lastSyncedAt && !overrides?.after && runSincePreset !== 'all') {
     afterMs = new Date(job.startDate).getTime();
   } else if (runSincePreset) {
     const baseMs = sincePresetToMs(runSincePreset);
