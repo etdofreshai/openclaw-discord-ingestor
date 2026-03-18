@@ -513,7 +513,14 @@ const REMOTE_LOGIN_HTML = /* html */ `<!DOCTYPE html>
   <div id="focus-hint">Click to focus • keyboard input will be forwarded</div>
 </div>
 <script>
-const BASE = '';
+// Detect if we're being served through a reverse proxy (e.g. /proxy/discord-ingestor/)
+// by stripping the known page path suffix from the current URL.
+const BASE = (() => {
+  const path = location.pathname;
+  const marker = '/discord-login';
+  const idx = path.lastIndexOf(marker);
+  return idx >= 0 ? path.slice(0, idx) : '';
+})();
 let ws = null;
 let sessionActive = false;
 let startTime = null;
@@ -567,7 +574,7 @@ function stopTimer() {
 function connectWs() {
   if (ws) { try { ws.close(); } catch {} }
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = proto + '//' + location.host + '/discord-login/ws';
+  const wsUrl = proto + '//' + location.host + BASE + '/discord-login/ws';
   ws = new WebSocket(wsUrl);
   ws.onopen = () => { console.log('[WS] Connected to screencast'); };
   ws.onmessage = (event) => {
@@ -597,7 +604,7 @@ function connectWs() {
         showOverlay('✅ Login successful! Redirecting…');
         document.getElementById('start-btn').disabled = false;
         if (ws) { try { ws.close(); } catch {} ws = null; }
-        setTimeout(() => { window.location.href = '/sync'; }, 1500);
+        setTimeout(() => { window.location.href = BASE + '/sync'; }, 1500);
       }
     } catch(e) {}
   };
