@@ -95,7 +95,7 @@ export async function ensureChromium(): Promise<void> {
           '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage',
-          '--headless=new',
+          '--headless',
           '--disable-gpu',
           '--disable-software-rasterizer',
           '--disable-blink-features=AutomationControlled',
@@ -115,6 +115,8 @@ export async function ensureChromium(): Promise<void> {
           // Required for rootless/unprivileged Docker environments
           '--no-zygote',
           '--single-process',
+          '--disable-crashpad',
+          '--in-process-gpu',
           'about:blank',
         ],
         {
@@ -146,8 +148,8 @@ export async function ensureChromium(): Promise<void> {
           process.stderr.write(`[chromium] ${d}`);
         }
       });
-      chromiumProc.on('exit', code => {
-        console.log(`[chromium] exited ${code}`);
+      chromiumProc.on('exit', (code, signal) => {
+        console.log(`[chromium] exited code=${code} signal=${signal}`);
         chromiumProc = null;
       });
 
