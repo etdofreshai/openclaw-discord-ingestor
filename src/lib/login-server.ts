@@ -604,7 +604,14 @@ function connectWs() {
         showOverlay('✅ Login successful! Redirecting…');
         document.getElementById('start-btn').disabled = false;
         if (ws) { try { ws.close(); } catch {} ws = null; }
-        setTimeout(() => { window.location.href = BASE + '/sync'; }, 1500);
+        setTimeout(() => {
+          // If served through the manager proxy, redirect to the manager's dashboard
+          if (BASE.includes('/proxy/')) {
+            window.location.href = '/discord/dashboard';
+          } else {
+            window.location.href = BASE + '/sync';
+          }
+        }, 1500);
       }
     } catch(e) {}
   };
