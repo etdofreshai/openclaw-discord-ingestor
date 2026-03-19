@@ -33,6 +33,68 @@ async function writeCacheFile(cache: ChannelCache): Promise<void> {
   await fs.writeFile(CACHE_FILE, JSON.stringify(cache, null, 2), 'utf8');
 }
 
+/** Minimum backoff for any 429 response, even if Retry-After is 0 or missing. */
+const MIN_RETRY_MS = 1500;
+/** Maximum retries per individual request before giving up. */
+const MAX_RETRIES = 5;
+
+/**
+ * Extract the wait time (ms) from a 429 response.
+ * Checks both the `Retry-After` header (seconds) and the JSON body `retry_after` field (seconds, float).
+ * Always returns at least MIN_RETRY_MS.
+ */
+async function extractRetryMs(res: Response, attempt: number): Promise<number> {
+  let retrySeconds = 0;
+
+  // Try header first
+  const headerVal = res.headers.get('retry-after');
+  if (headerVal) {
+    retrySeconds = parseFloat(headerVal) || 0;
+  }
+
+  // Try JSON body (Discord often puts retry_after here)
+  if (retrySeconds <= 0) {
+    try {
+      const body = await res.clone().json();
+      if (body && typeof body.retry_after === 'number') {
+        retrySeconds = body.retry_after;
+      }
+    } catch {
+      // ignore parse errors
+    }
+  }
+
+  const baseMs = Math.max(retrySeconds * 1000, MIN_RETRY_MS);
+  // Exponential backoff: base * 2^attempt (attempt 0 = 1x, 1 = 2x, 2 = 4x, ...)
+  const backoffMs = baseMs * Math.pow(2, attempt);
+  return Math.min(backoffMs, 60_000); // cap at 60s
+}
+
+/**
+ * Fetch with automatic 429 retry + exponential backoff.
+ */
+async function fetchWithRetry(url: string, init: RequestInit, label: string): Promise<Response> {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const res = await fetch(url, init);
+
+    if (res.status !== 429) return res;
+
+    if (attempt >= MAX_RETRIES) {
+      console.error(`[channel-cache] ${label}: exhausted ${MAX_RETRIES} retries on 429`);
+      return res;
+    }
+
+    const waitMs = await extractRetryMs(res, attempt);
+    console.warn(
+      `[channel-cache] ${label}: 429 rate-limited — waiting ${waitMs}ms (attempt ${attempt + 1}/${MAX_RETRIES})`
+    );
+    await new Promise((r) => setTimeout(r, waitMs));
+  }
+
+  // unreachable but satisfies TS
+  throw new Error('fetchWithRetry: unreachable');
+}
+
 async function refreshFromDiscord(): Promise<ChannelCache> {
   const session = await loadSession();
   if (!session) {
@@ -41,11 +103,14 @@ async function refreshFromDiscord(): Promise<ChannelCache> {
   }
 
   const channels: Record<string, ChannelInfo> = {};
+  const headers = { Authorization: session.token };
 
   // Fetch all guilds
-  const guildsRes = await fetch('https://discord.com/api/v10/users/@me/guilds', {
-    headers: { Authorization: session.token },
-  });
+  const guildsRes = await fetchWithRetry(
+    'https://discord.com/api/v10/users/@me/guilds',
+    { headers },
+    'guilds'
+  );
 
   if (!guildsRes.ok) {
     console.error(`[channel-cache] Failed to fetch guilds: ${guildsRes.status}`);
@@ -57,26 +122,11 @@ async function refreshFromDiscord(): Promise<ChannelCache> {
 
   for (const guild of guilds) {
     try {
-      const chRes = await fetch(`https://discord.com/api/v10/guilds/${guild.id}/channels`, {
-        headers: { Authorization: session.token },
-      });
-
-      if (chRes.status === 429) {
-        const retryAfter = parseFloat(chRes.headers.get('retry-after') ?? '5');
-        console.warn(`[channel-cache] Rate limited, waiting ${retryAfter}s...`);
-        await new Promise((r) => setTimeout(r, retryAfter * 1000 + 500));
-        // Retry this guild
-        const retryRes = await fetch(`https://discord.com/api/v10/guilds/${guild.id}/channels`, {
-          headers: { Authorization: session.token },
-        });
-        if (retryRes.ok) {
-          const chs = (await retryRes.json()) as Array<{ id: string; name: string }>;
-          for (const ch of chs) {
-            channels[ch.id] = { channelName: ch.name, guildId: guild.id, guildName: guild.name };
-          }
-        }
-        continue;
-      }
+      const chRes = await fetchWithRetry(
+        `https://discord.com/api/v10/guilds/${guild.id}/channels`,
+        { headers },
+        `guild:${guild.name}`
+      );
 
       if (!chRes.ok) {
         console.warn(`[channel-cache] Failed for guild ${guild.name}: ${chRes.status}`);
@@ -91,14 +141,17 @@ async function refreshFromDiscord(): Promise<ChannelCache> {
       console.warn(`[channel-cache] Error for guild ${guild.name}:`, err);
     }
 
-    await new Promise((r) => setTimeout(r, 300));
+    // Space out requests to avoid hitting rate limits in the first place
+    await new Promise((r) => setTimeout(r, 500));
   }
 
   // Fetch DM channels
   try {
-    const dmRes = await fetch('https://discord.com/api/v10/users/@me/channels', {
-      headers: { Authorization: session.token },
-    });
+    const dmRes = await fetchWithRetry(
+      'https://discord.com/api/v10/users/@me/channels',
+      { headers },
+      'dm-channels'
+    );
     if (dmRes.ok) {
       const dmChannels = (await dmRes.json()) as Array<{
         id: string;
@@ -108,12 +161,10 @@ async function refreshFromDiscord(): Promise<ChannelCache> {
       }>;
       for (const dm of dmChannels) {
         if (dm.type === 1 && dm.recipients?.length) {
-          // DM channel - name is the other user
           const recipient = dm.recipients[0];
           const displayName = recipient.global_name || recipient.username;
           channels[dm.id] = { channelName: displayName, guildId: null, guildName: 'Direct Messages' };
         } else if (dm.type === 3) {
-          // Group DM
           const name = dm.name || dm.recipients?.map(r => r.global_name || r.username).join(', ') || 'Group DM';
           channels[dm.id] = { channelName: name, guildId: null, guildName: 'Direct Messages' };
         }
